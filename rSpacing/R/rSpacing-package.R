@@ -1,0 +1,27 @@
+#' rSpacing: an R interface to Spacing.Tool2 and APSIM Next Generation
+#'
+#' `rSpacing` provides a validated, reproducible interface between R and the
+#' custom C# `Spacing.Tool2` workflow. It builds command-line requests, executes
+#' the external process, records provenance, discovers generated files, and
+#' imports APSIM SQLite and CSV outputs.
+#'
+#' The package deliberately keeps model construction and simulation in C# and
+#' APSIMx. R owns orchestration, validation, provenance, result collection, and
+#' downstream analysis.
+#'
+#' @section Main workflow:
+#' 1. Create a project configuration with [spacing_config()].
+#' 2. Create one scientific request with [new_spacing_request()].
+#' 3. Execute it with [run_spacing()].
+#' 4. Import outputs with [read_spacing()].
+#' 5. Inspect and plot outputs with [inventory_spacing_result()] and [plot_spacing_result()].
+#' 6. Map simulation coordinates with [plot_spacing_location()] or [plot_spacing_map()].
+#' 7. Combine several results with [collect_spacing()].
+#'
+#' @section External software:
+#' A real model run requires the custom `Spacing.Tool2` project and either the
+#' `dotnet` executable or a compiled Tool2 executable. Unit tests do not require
+#' APSIMx or .NET.
+#'
+#' @keywords internal
+"_PACKAGE"
