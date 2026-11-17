@@ -1,7 +1,7 @@
 Package: rSpacing
 Type: Package
 Title: Reproducible R Interface to Spacing.Tool2 and APSIM Next Generation
-Version: 0.10.04
+Version: 0.10.05
 Authors@R: c(
     person("Maurizio", "Bagnara", role = c("aut", "cre"),
            email = "maurizio.bagnara@crea.gov.it"),
@@ -31,8 +31,11 @@ Imports:
     fs,
     digest,
     ggplot2,
+    rlang,
     patchwork
 Suggests:
+    knitr,
+    rmarkdown,
     testthat (>= 3.0.0),
     roxygen2,
     covr,
@@ -44,3 +47,4 @@ Config/testthat/edition: 3
 URL: https://github.com/GeoModelLab/rSpacing
 BugReports: https://github.com/GeoModelLab/rSpacing/issues
 Config/roxygen2/version: 8.1.0
+VignetteBuilder: knitr

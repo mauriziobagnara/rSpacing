@@ -11,7 +11,9 @@ collect_spacing(results)
 }
 \value{
 A named list of row-bound data frames. `.run_id` and `.scenario_id`
-  provenance columns are added. Zero-row tables are retained with zero-length character provenance columns. Columns missing from individual runs are filled with \code{NA} before row-binding.
+  provenance columns are added. Zero-row tables are retained with zero-length
+  character provenance columns. Columns missing from individual runs are filled
+  with `NA` before row-binding.
 }
 \description{
 Combine CSV outputs from several results

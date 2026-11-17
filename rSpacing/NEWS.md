@@ -1,3 +1,21 @@
+# rSpacing 0.10.05
+
+- Added `plot_spacing_atlas()` for automatic daily, Report, and soil plot collections.
+- Added `plot_spacing_yield()` for crop/cultivar yield summaries.
+- Added `plot_spacing_irrigation()` and `plot_spacing_fertilisation()` for applied-management outputs.
+- Added `plot_spacing_soil_carbon()` for stock, change, percentage change, profile, and time-depth views.
+- Added `plot_spacing_comparison()` for comparing variables across runs.
+- No C# source or execution API was changed. The stable C# reference remains Spacing.Tool2 0.09.05.
+
+## Packaging and test corrections
+
+- Serialise parameter catalogues as row-oriented JSON records and restore scalar or null values robustly.
+- Restore the optional `run_spec` argument in `build_spacing_args()` and validate the JSON before adding `--run-spec`.
+- Preserve the long Windows path spelling returned by `normalizePath()` instead of allowing `fs::path_abs()` to emit an equivalent 8.3 path.
+- Replace deprecated `ggplot2::aes_string()` calls with tidy-evaluation mappings.
+- Remove row-name recycling warnings from layered soil-profile plots.
+
+
 # rSpacing 0.10.04
 
 - Corrected `collect_spacing()` for CSV data frames with zero rows.
@@ -51,3 +69,13 @@
 
 rSpacing 0.09 was an experimental reduced API branch. It is not used as the
 structural base of this release.
+
+## Vignette
+
+- Added `vignettes/rSpacing-workflow.Rmd`, an executable manual covering the primary and advanced APIs.
+- Result sections use a verified APSIMx fixture or an explicitly requested live run.
+- Added `inst/scripts/build_reference_fixture.R` to generate the real reference fixture on the verified Windows workstation.
+
+## Vignette weather correction
+
+- The weather subsetting example now reconstructs dates from APSIM `year` and day-of-year columns instead of referring to a non-existent `data$date` field.

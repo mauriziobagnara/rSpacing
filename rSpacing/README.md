@@ -2,6 +2,113 @@
 
 An R interface for the custom `Spacing.Tool2` and APSIM Next Generation workflow.
 
+
+## Install rSpacing with the vignette
+
+The package vignette is built from `vignettes/rSpacing-workflow_EN.Rmd` and uses the bundled reference fixture in `inst/extdata/reference_maize/`. Building the vignette does **not** run APSIMx or `Spacing.Tool2`.
+
+A standard `devtools::install()` call does not build vignettes unless this is requested explicitly. From the root directory of the `rSpacing` source package, install the package with:
+
+```r
+install.packages(c(
+  "devtools",
+  "knitr",
+  "rmarkdown"
+))
+
+devtools::install(
+  pkg = ".",
+  build = TRUE,
+  build_vignettes = TRUE,
+  dependencies = TRUE,
+  upgrade = FALSE
+)
+```
+
+Restart R after installation, then verify the installed package and open the manual:
+
+```r
+library(rSpacing)
+
+packageVersion("rSpacing")
+vignette(package = "rSpacing")
+vignette("rSpacing-workflow_EN", package = "rSpacing")
+```
+
+The expected package version is:
+
+```text
+0.10.05
+```
+
+The vignette is listed as:
+
+```text
+rSpacing user manual: workflow with real APSIMx results
+```
+
+To browse all installed vignettes interactively:
+
+```r
+browseVignettes(package = "rSpacing")
+```
+
+### Recommended clean source-package installation
+
+For the closest test of what another user will receive, first build the source tarball with the vignette and then install that tarball:
+
+```r
+tarball <- devtools::build(
+  pkg = ".",
+  vignettes = TRUE,
+  manual = FALSE
+)
+
+install.packages(
+  tarball,
+  repos = NULL,
+  type = "source"
+)
+```
+
+After restarting R:
+
+```r
+library(rSpacing)
+packageVersion("rSpacing")
+vignette(package = "rSpacing")
+```
+
+### Verify vignette creation before installation
+
+If the vignette does not appear after installation, test its construction directly from the package root:
+
+```r
+tools::buildVignettes(dir = ".")
+```
+
+Then inspect the installed package:
+
+```r
+pkg <- find.package("rSpacing")
+
+file.exists(file.path(pkg, "Meta", "vignette.rds"))
+list.files(file.path(pkg, "doc"), full.names = TRUE)
+```
+
+A successful installation with the vignette should contain the vignette index in `Meta/vignette.rds` and the rendered manual under the installed package's `doc/` directory.
+
+### Important source files
+
+Keep these files in the source package:
+
+```text
+vignettes/rSpacing-workflow_EN.Rmd
+inst/extdata/reference_maize/
+```
+
+The generated `vignettes/rSpacing-workflow_EN.html` file is not required in the source tree because the HTML manual is rebuilt from the Rmd during package build.
+
 ## Minimal intended use
 
 ```r

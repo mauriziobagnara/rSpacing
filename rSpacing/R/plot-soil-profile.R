@@ -76,8 +76,17 @@ plot_spacing_soil_profile <- function(result, variable, thickness = NULL,
   if (!is.null(end_date)) keep <- keep & dates <= as.Date(end_date)
   if (!any(keep)) .rspacing_abort("No observations remain after date filtering.", "spacing_schema_error")
   dates <- dates[keep]; daily <- daily[keep,,drop=FALSE]
-  long <- do.call(rbind, lapply(seq_along(cols), function(i) data.frame(
-    date=dates, geometry[i,], value=daily[[cols[i]]], stringsAsFactors=FALSE)))
+  long <- do.call(rbind, lapply(seq_along(cols), function(i) {
+    geometry_rows <- geometry[rep(i, length(dates)), , drop = FALSE]
+    rownames(geometry_rows) <- NULL
+    data.frame(
+      date = dates,
+      geometry_rows,
+      value = daily[[cols[i]]],
+      stringsAsFactors = FALSE,
+      row.names = NULL
+    )
+  }))
   unit <- spacing_variable_unit(result, cols[1], table="DailyReport", default="")
   legend_title <- if (nzchar(unit)) paste0(base, " (", unit, ")") else base
   if (type == "time_depth") {

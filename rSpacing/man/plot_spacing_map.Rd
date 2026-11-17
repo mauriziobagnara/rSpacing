@@ -2,26 +2,47 @@
 % Please edit documentation in R/location-map.R
 \name{plot_spacing_map}
 \alias{plot_spacing_map}
-\alias{plot_spacing_location}
-\title{Plot simulation locations}
+\title{Plot simulation locations on a static or interactive map}
 \usage{
-plot_spacing_map(x, type = c("static", "interactive"), label = NULL,
+plot_spacing_map(
+  x,
+  type = c("static", "interactive"),
+  label = NULL,
   colour_by = c("rotation", "status", "mock", "scenario_id"),
-  basemap = TRUE, zoom = 10, point_size = 4, label_points = TRUE,
-  title = NULL)
-plot_spacing_location(x, ...)
+  basemap = TRUE,
+  zoom = 10,
+  point_size = 4,
+  label_points = TRUE,
+  title = NULL
+)
 }
 \arguments{
-\item{x}{An object accepted by \code{spacing_coordinates()}.}
-\item{type}{Output type: static or interactive.}
+\item{x}{An object accepted by [spacing_coordinates()].}
+
+\item{type}{Output type: `"static"` or `"interactive"`.}
+
 \item{label}{Optional single-location label.}
-\item{colour_by}{Metadata column used to colour points.}
-\item{basemap}{Add a geographic basemap or web tiles when possible.}
-\item{zoom}{Initial Leaflet zoom for one point.}
-\item{point_size}{Static map point size.}
-\item{label_points}{Show labels on the static map.}
+
+\item{colour_by}{Metadata column used to colour points on static maps.}
+
+\item{basemap}{Logical. Add a geographic basemap or web tiles when possible.}
+
+\item{zoom}{Initial Leaflet zoom for a single point.}
+
+\item{point_size}{Static-map point size.}
+
+\item{label_points}{Logical. Show labels on the static map.}
+
 \item{title}{Optional map title.}
-\item{...}{Arguments passed to \code{plot_spacing_map()}.}
 }
-\value{A ggplot object or an interactive Leaflet htmlwidget.}
-\description{Creates static or interactive maps showing one or more rSpacing simulation locations.}
+\value{
+A `ggplot` object for static maps or a `leaflet` htmlwidget for
+  interactive maps.
+}
+\description{
+Creates a publication-friendly static map or an interactive Leaflet map from
+simulation coordinates. Static maps work with ggplot2 alone; when the
+optional `maps` package is installed, a geographic basemap is added.
+Interactive maps require the optional `leaflet` package and Internet access
+when web tiles are requested.
+}

@@ -368,7 +368,18 @@ validate_spacing_run_spec <- function(x) {
 }
 
 .run_spec_as_list <- function(x) {
-  unclass(x)
+  out <- unclass(x)
+  if (!is.null(x$ParameterCatalogue)) {
+    catalogue <- as.data.frame(
+      x$ParameterCatalogue,
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+    out$ParameterCatalogue <- lapply(seq_len(nrow(catalogue)), function(i) {
+      as.list(catalogue[i, , drop = FALSE])
+    })
+  }
+  out
 }
 
 #' Write an APSIM run specification to JSON
@@ -416,16 +427,25 @@ write_spacing_run_spec <- function(x, path, overwrite = FALSE) {
   # Column-oriented JSON object: each required name is a vector/list column.
   if (all(required %in% names(x))) {
     columns <- lapply(x[required], function(column) {
-      if (is.list(column)) unlist(column, recursive = FALSE, use.names = FALSE)
-      else column
+      if (is.null(column)) return(NA)
+      if (is.list(column)) {
+        return(vapply(column, function(value) {
+          if (is.null(value) || !length(value)) NA
+          else value[[1L]]
+        }, FUN.VALUE = if (is.numeric(unlist(column))) numeric(1) else character(1)))
+      }
+      column
     })
     lengths <- vapply(columns, length, integer(1))
-    if (!length(lengths) || any(lengths != lengths[[1L]])) {
-      .rspacing_abort(
+    target_length <- max(lengths)
+    columns <- lapply(columns, function(column) {
+      if (length(column) == target_length) column
+      else if (length(column) == 1L) rep(column, target_length)
+      else .rspacing_abort(
         "ParameterCatalogue columns have inconsistent lengths after JSON import.",
         "spacing_validation_error"
       )
-    }
+    })
     data <- as.data.frame(columns, stringsAsFactors = FALSE,
                           optional = TRUE, check.names = FALSE)
     return(spacing_parameter_catalogue(data))
@@ -440,8 +460,9 @@ write_spacing_run_spec <- function(x, path, overwrite = FALSE) {
   if (records_are_valid) {
     rows <- lapply(x, function(record) {
       values <- lapply(record[required], function(value) {
-        if (is.list(value)) unlist(value, recursive = FALSE, use.names = FALSE)
-        else value
+        if (is.null(value) || !length(value)) return(NA)
+        if (is.list(value)) value <- unlist(value, recursive = FALSE, use.names = FALSE)
+        value[[1L]]
       })
       as.data.frame(values, stringsAsFactors = FALSE,
                     optional = TRUE, check.names = FALSE)

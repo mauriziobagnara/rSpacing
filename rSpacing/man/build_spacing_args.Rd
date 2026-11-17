@@ -4,12 +4,14 @@
 \alias{build_spacing_args}
 \title{Build Tool2 command-line arguments}
 \usage{
-build_spacing_args(config, request)
+build_spacing_args(config, request, run_spec = NULL)
 }
 \arguments{
 \item{config}{A `spacing_config` object.}
 
 \item{request}{A `spacing_request` object.}
+
+\item{run_spec}{Optional path to a validated run-spec JSON file.}
 }
 \value{
 A character vector beginning with `--config`.

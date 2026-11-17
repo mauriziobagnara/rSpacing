@@ -18,5 +18,6 @@ A `spacing_met` object.
 }
 \description{
 Reads comments, section, constants, units, and daily values. Unknown columns
-and constants are preserved.
+and constants are preserved. Constant names are normalised to lower case, so
+APSIM files using Latitude, TAV, or AMP remain compatible.
 }

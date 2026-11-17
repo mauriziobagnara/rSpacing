@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "package": "rSpacing",
+  "run_id": "20261116T093433-6ab6ed79ae69776d",
+  "started": "2026-11-16T09:34:33.104+0100",
+  "ended": "2026-11-16T09:34:45.508+0100",
+  "duration_seconds": 12.4042789936066,
+  "command": "dotnet",
+  "arguments": ["run", "--project", "C:/Users/maurizio.bagnara/Documents/spacing-main/apsim/src/Spacing.Tool2", "--", "--config", "C:/Users/maurizio.bagnara/Documents/spacing-main/apsim/spacing.config.json", "--lat", "44.9", "--lon", "10.63", "--rotation", "Maize", "--mock"],
+  "status": 0,
+  "timeout": false,
+  "repository": "C:/Users/maurizio.bagnara/Documents/spacing-main",
+  "config_file": "C:/Users/maurizio.bagnara/Documents/spacing-main/apsim/spacing.config.json",
+  "config_sha256": "a03ef28bc6d2bcef4262357a1e2dd20dd3b1daa11cbe6f5b6ebbe4ce891efb6e",
+  "request": {
+    "latitude": 44.9,
+    "longitude": 10.63,
+    "rotation": "Maize",
+    "mock": true,
+    "met_file": null,
+    "calibrate": false,
+    "observations": null,
+    "yield_weight": null,
+    "lai_weight": null,
+    "simplexes": null,
+    "scenario_id": "reference_maize_B_110_annual",
+    "extra_args": []
+  },
+  "outputs": {
+    "apsimx": "/tmp/spacing/output/spacing_CELL_449_106__CELL_449_106_S1__tool2_cli.apsimx",
+    "database": "/tmp/spacing/output/spacing_CELL_449_106__CELL_449_106_S1__tool2_cli.db",
+    "csv": ["/tmp/spacing/output/crop_summary_CELL_449_106_CELL_449_106_S1_tool2_cli.csv", "/tmp/spacing/output/daily_CELL_449_106_CELL_449_106_S1_tool2_cli.csv", "/tmp/spacing/output/report_CELL_449_106_CELL_449_106_S1_tool2_cli.csv"],
+    "weather": "/tmp/spacing/weather/CELL_449_106_1990_2023.met",
+    "other": ["/tmp/spacing/output/rSpacing-runs/20261116T093433-6ab6ed79ae69776d/stderr.log", "/tmp/spacing/output/rSpacing-runs/20261116T093433-6ab6ed79ae69776d/stdout.log", "/tmp/spacing/output/run_manifest_eddf5682eb104c4881e8dd40bd03dcf4.json"]
+  },
+  "run_dir": "/tmp/spacing/output/rSpacing-runs/20261116T093433-6ab6ed79ae69776d"
+}

@@ -1,0 +1,14 @@
+{
+  "latitude": 44.9,
+  "longitude": 10.63,
+  "rotation": "Maize",
+  "mock": true,
+  "met_file": null,
+  "calibrate": false,
+  "observations": null,
+  "yield_weight": null,
+  "lai_weight": null,
+  "simplexes": null,
+  "scenario_id": "reference_maize_B_110_annual",
+  "extra_args": []
+}

@@ -3,10 +3,21 @@
 \name{spacing_coordinates}
 \alias{spacing_coordinates}
 \title{Extract simulation coordinates and location metadata}
-\usage{spacing_coordinates(x, label = NULL)}
+\usage{
+spacing_coordinates(x, label = NULL)
+}
 \arguments{
 \item{x}{An rSpacing object, data frame, or list of supported objects.}
-\item{label}{Optional label used when x represents a single location.}
+
+\item{label}{Optional label used when `x` represents a single location.}
 }
-\value{A data frame with scenario, cell, latitude, longitude, rotation, mock mode, status, and label.}
-\description{Standardises spatial metadata from spacing requests, runs, results, data frames, and lists.}
+\value{
+A data frame with scenario, cell, latitude, longitude, rotation,
+  mock mode, status, and label.
+}
+\description{
+Standardises spatial metadata from one or more rSpacing objects. Supported
+inputs include `spacing_request`, `spacing_run`, `spacing_result`, a data
+frame with latitude and longitude columns, and lists containing any of these
+objects.
+}

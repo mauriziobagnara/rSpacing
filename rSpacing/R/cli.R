@@ -6,13 +6,14 @@
 #'
 #' @param config A `spacing_config` object.
 #' @param request A `spacing_request` object.
+#' @param run_spec Optional path to a validated run-spec JSON file.
 #' @return A character vector beginning with `--config`.
 #' @export
 #' @examples
 #' \dontrun{
 #' build_spacing_args(cfg, new_spacing_request(45.4, 9.2, "Maize", mock=TRUE))
 #' }
-build_spacing_args <- function(config, request) {
+build_spacing_args <- function(config, request, run_spec = NULL) {
   validate_spacing_config(config, check_dotnet = FALSE)
   validate_spacing_request(request)
   tool_args <- c("--config", config$config_file,
@@ -26,6 +27,29 @@ build_spacing_args <- function(config, request) {
   if (!is.null(request$yield_weight)) tool_args <- c(tool_args, "--yield-weight", as.character(request$yield_weight))
   if (!is.null(request$lai_weight)) tool_args <- c(tool_args, "--lai-weight", as.character(request$lai_weight))
   if (!is.null(request$simplexes)) tool_args <- c(tool_args, "--simplexes", as.character(request$simplexes))
+  if (!is.null(run_spec)) {
+    if (!is.character(run_spec) || length(run_spec) != 1L ||
+        is.na(run_spec) || !nzchar(run_spec)) {
+      .rspacing_abort(
+        "'run_spec' must be one non-empty path.",
+        "spacing_validation_error"
+      )
+    }
+    if (!file.exists(run_spec)) {
+      .rspacing_abort(
+        sprintf("run_spec not found: %s", run_spec),
+        "spacing_validation_error",
+        path = run_spec
+      )
+    }
+    run_spec <- normalizePath(
+      run_spec,
+      winslash = "/",
+      mustWork = TRUE
+    )
+    read_spacing_run_spec(run_spec, validate = TRUE)
+    tool_args <- c(tool_args, "--run-spec", run_spec)
+  }
   c(tool_args, request$extra_args)
 }
 

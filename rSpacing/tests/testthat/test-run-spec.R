@@ -126,3 +126,18 @@ test_that("calibration parameters can be updated without changing code", {
   expect_equal(y$ParameterValues$min_leaf_no, 7.1)
   expect_equal(x$ParameterValues$min_leaf_no, 6.4)
 })
+
+
+test_that("single-row parameter catalogues use row-oriented JSON", {
+  x <- make_run_spec()
+  path <- tempfile(fileext = ".json")
+  write_spacing_run_spec(x, path)
+  raw <- jsonlite::read_json(path, simplifyVector = FALSE)
+  expect_true(is.list(raw$ParameterCatalogue))
+  expect_length(raw$ParameterCatalogue, 1L)
+  expect_true(all(c("parameter_id", "lower_bound", "upper_bound") %in%
+                  names(raw$ParameterCatalogue[[1L]])))
+  y <- read_spacing_run_spec(path)
+  expect_s3_class(y$ParameterCatalogue, "spacing_parameter_catalogue")
+  expect_equal(nrow(y$ParameterCatalogue), 1L)
+})
