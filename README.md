@@ -22,8 +22,6 @@ Do not put `runs`, `results`, or `logs` inside either repository.
 
 ## Repositories to record before testing
 
-Fill these fields before delivery:
-
 ```text
 rSpacing repository URL: https://github.com/mauriziobagnara/rSpacing
 rSpacing branch: development-Maurizio
