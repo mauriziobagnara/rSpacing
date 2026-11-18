@@ -12,10 +12,10 @@ rSpacing_workspace/
 ├── setup_workspace.ps1
 ├── rSpacing/          # R package repository, version 0.10.05
 ├── apsim/             # APSIMxSpacing C# repository, Spacing.Tool2 version 0.09.05
-├── workflows/         # writable copies of operational Rmd files
-├── runs/              # temporary APSIMx runs; not versioned
-├── results/           # persistent tables, figures, fixtures, and rankings
-└── logs/              # environment, build, and test logs
+├── workflows/         # writable copies of operational Rmd files (created during setup)
+├── runs/              # temporary APSIMx runs; not versioned (created during setup)
+├── results/           # persistent tables, figures, fixtures, and rankings (created during setup)
+└── logs/              # environment, build, and test logs (created during setup)
 ```
 
 Do not place `runs/`, `results/`, or `logs/` inside either repository.
