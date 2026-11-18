@@ -6,7 +6,7 @@ This workspace is the stable local layout for testing and future development. Th
 
 ```text
 rSpacing_workspace/
-├── README_FIRST.md
+├── README.md
 ├── TEST_PROTOCOL.md
 ├── environment_check.R
 ├── setup_workspace.ps1
