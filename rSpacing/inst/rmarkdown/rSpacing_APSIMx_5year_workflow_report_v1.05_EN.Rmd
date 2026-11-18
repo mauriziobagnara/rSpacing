@@ -29,8 +29,6 @@ required_packages <- c("jsonlite", "ggplot2")
 missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly=TRUE)]
 if (length(missing_packages)) stop("Missing R packages: ", paste(missing_packages, collapse=", "))
 library(ggplot2)
-DOCUMENT_STARTED_AT <- Sys.time()
-MODEL_RUN_ELAPSED_SECONDS <- NA_real_
 
 normalize_win <- function(path, must_work=FALSE) {
   normalizePath(path, winslash="/", mustWork=must_work)
@@ -417,16 +415,12 @@ if (isTRUE(USE_MOCK_WEATHER)) {
 message("Esecuzione di Spacing.Tool2...")
 message("Run directory: ", normalize_win(run_dir, must_work = TRUE))
 
-model_run_started_at <- Sys.time()
 exit_status <- system2(
   command = "dotnet",
   args = args,
   stdout = stdout_path,
   stderr = stderr_path,
   wait = TRUE
-)
-MODEL_RUN_ELAPSED_SECONDS <- as.numeric(
-  difftime(Sys.time(), model_run_started_at, units = "secs")
 )
 
 stdout_text <- if (file.exists(stdout_path)) {
@@ -1311,45 +1305,6 @@ empty_plot <- function(label) { plot.new(); text(0.5,0.5,label) }
 ```
 
 
-# Computation time and workload
-
-This workflow performs one complete five-year APSIMx run when `build_fixture = true` and performs no APSIMx runs when `build_fixture = false`. Rebuilding the report from an existing fixture is therefore much faster than regenerating the fixture. The measured duration depends on processor, storage, .NET warm-up, and APSIMx DataStore performance; the current workstation measurement is retained instead of assuming a universal duration.
-
-```{r computation-time}
-fixture_model_seconds <- if (
-  !is.null(x$model$elapsed_seconds) &&
-  length(x$model$elapsed_seconds) &&
-  is.finite(as.numeric(x$model$elapsed_seconds[[1L]]))
-) {
-  as.numeric(x$model$elapsed_seconds[[1L]])
-} else {
-  MODEL_RUN_ELAPSED_SECONDS
-}
-
-TOTAL_DOCUMENT_ELAPSED_SECONDS <- as.numeric(
-  difftime(Sys.time(), DOCUMENT_STARTED_AT, units = "secs")
-)
-
-computation_time <- data.frame(
-  mode = if (isTRUE(params$build_fixture)) {
-    "new five-year APSIMx run and fixture build"
-  } else {
-    "report rebuilt from existing fixture"
-  },
-  planned_APSIMx_runs = if (isTRUE(params$build_fixture)) 1L else 0L,
-  measured_model_run_seconds = fixture_model_seconds,
-  measured_model_run_minutes = fixture_model_seconds / 60,
-  measured_document_seconds_so_far = TOTAL_DOCUMENT_ELAPSED_SECONDS,
-  stringsAsFactors = FALSE
-)
-computation_time
-utils::write.csv(
-  computation_time,
-  file.path(LOG_ROOT, "computation_time.csv"),
-  row.names = FALSE
-)
-```
-
 # Fixture status
 
 The document logically separates two stages while keeping them in the same Rmd: the initial chunk runs and normalizes the simulation, while subsequent chunks read only the canonical fixture. After the first run, set `params$build_fixture = false` to rebuild tables and plots without rerunning APSIMx.
@@ -1772,27 +1727,4 @@ Diagnostics are operational evidence. They explain execution failures and data-e
 
 ```{r diagnostics}
 cat("STDOUT\n",x$diagnostics$stdout,"\n\nSTDERR\n",x$diagnostics$stderr)
-```
-
-
-# Final document elapsed time
-
-The following table records the total elapsed rendering time. When a fixture is reused, this value reflects reporting only; when a fixture is built, it includes model execution, output import, normalisation, tables, and figures.
-
-```{r final-document-time}
-FINAL_DOCUMENT_ELAPSED_SECONDS <- as.numeric(
-  difftime(Sys.time(), DOCUMENT_STARTED_AT, units = "secs")
-)
-final_document_time <- data.frame(
-  build_fixture = isTRUE(params$build_fixture),
-  total_render_seconds = FINAL_DOCUMENT_ELAPSED_SECONDS,
-  total_render_minutes = FINAL_DOCUMENT_ELAPSED_SECONDS / 60,
-  stringsAsFactors = FALSE
-)
-final_document_time
-utils::write.csv(
-  final_document_time,
-  file.path(LOG_ROOT, "document_elapsed_time.csv"),
-  row.names = FALSE
-)
 ```

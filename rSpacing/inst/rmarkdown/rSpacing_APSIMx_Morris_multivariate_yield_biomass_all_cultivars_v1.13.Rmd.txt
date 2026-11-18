@@ -1,5 +1,5 @@
 ---
-title: "rSpacing/APSIMx: multivariate Morris sensitivity of all cultivar yields and total biomass, v1.14 workspace edition with parameter preflight and presentation guidance"
+title: "rSpacing/APSIMx: multivariate Morris sensitivity of all cultivar yields and total biomass, v1.13 with parameter preflight and presentation guidance"
 author: "Maurizio Bagnara"
 date: "`r format(Sys.Date(), '%d %B %Y')`"
 output:
@@ -9,17 +9,12 @@ output:
     number_sections: true
     df_print: paged
 params:
-  workspace_root: ".."
   execute_runs: true
   reuse_completed_runs: false
-  analysis_profile: "smoke"
-  trajectories: 2
+  trajectories: 10
   levels: 4
   grid_jump: 2
   seed: 1244
-  output_subdir: "morris_v114_smoke"
-  build_configuration: "Debug"
-  target_framework: "net8.0"
   show_rows: 30
 ---
 
@@ -37,7 +32,6 @@ missing_packages <- required_packages[!vapply(required_packages, requireNamespac
 if (length(missing_packages)) stop("Missing R packages: ", paste(missing_packages, collapse=", "))
 has_rsqlite <- requireNamespace("DBI", quietly=TRUE) && requireNamespace("RSQLite", quietly=TRUE)
 library(ggplot2)
-DOCUMENT_STARTED_AT <- Sys.time()
 show_table <- function(x,n=params$show_rows) {
  if (is.null(x) || !is.data.frame(x) || !nrow(x)) return(data.frame(note="No data available"))
  utils::head(x,n)
@@ -49,7 +43,7 @@ empty_plot <- function(label) { plot.new(); text(.5,.5,label) }
 
 Each APSIMx run executes the complete 2020-2024 Wheat-Maize-Soybean rotation and returns yield and total crop biomass for Wheat/Hartog, Maize/B_110, and Soybean/Generic_MG1. A **single multivariate target function** standardizes those six responses against one common baseline and combines them into one weighted root-mean-square score.
 
-Before constructing the Morris design, v1.14 tests every candidate parameter independently against a newly executed baseline. Only parameters whose single override completes successfully and returns all six responses enter the Morris factor space. The final run count is therefore `trajectories x (validated factors + 1)`, plus one baseline and one preflight run per candidate parameter. The resulting `mu`, `mu*`, and `sigma` therefore form **one global ranking**, rather than separate rankings by crop or output.
+Before constructing the Morris design, v1.12 tests every candidate parameter independently against a newly executed baseline. Only parameters whose single override completes successfully and returns all six responses enter the Morris factor space. The final run count is therefore `trajectories x (validated factors + 1)`, plus one baseline and one preflight run per candidate parameter. The resulting `mu`, `mu*`, and `sigma` therefore form **one global ranking**, rather than separate rankings by crop or output.
 
 All response components remain stored in the canonical fixture for interpretation. The unified ranking is calculated from the single composite score only.
 
@@ -57,16 +51,14 @@ All response components remain stored in the canonical fixture for interpretatio
 
 ### What is configured
 
-This block fixes the 2020-2024 experiment, location, mock-weather mode and Morris settings supplied in the YAML header. It verifies the `Spacing.Tool2` project, compiled DLL and `dotnet`, then creates a unique analysis identifier. The short workspace `runs/m114_*` execution path reduces the risk of Windows and SQLite path-length errors.
+This block fixes the 2020-2024 experiment, location, mock-weather mode and Morris settings supplied in the YAML header. It verifies the `Spacing.Tool2` project, compiled DLL and `dotnet`, then creates a unique analysis identifier. The short `_m513` execution path reduces the risk of Windows and SQLite path-length errors.
 
 **How to read this section.** `trajectories`, `levels`, `grid_jump` and `seed` define the Morris design, while years, coordinates, crops and weather mode remain fixed across runs. The fresh-run gate prevents accidental reuse of previous simulation folders.
 
 ```{r configuration}
-WORKSPACE_ROOT <- normalizePath(params$workspace_root,winslash="/",mustWork=TRUE)
-RSPACING_ROOT <- normalizePath(file.path(WORKSPACE_ROOT,"rSpacing"),winslash="/",mustWork=TRUE)
-SPACING_ROOT <- normalizePath(file.path(WORKSPACE_ROOT,"apsim"),winslash="/",mustWork=TRUE)
-BUILD_CONFIGURATION <- as.character(params$build_configuration)
-TARGET_FRAMEWORK <- as.character(params$target_framework)
+SPACING_ROOT <- "C:/Users/maurizio.bagnara/Documents/spacing-main/apsim"
+BUILD_CONFIGURATION <- "Debug"
+TARGET_FRAMEWORK <- "net8.0"
 USE_MOCK_WEATHER <- TRUE
 START_YEAR <- 2020L
 END_YEAR <- 2024L
@@ -74,41 +66,27 @@ LATITUDE <- 44.9000
 LONGITUDE <- 10.6300
 CELL_ID <- "GUA"
 TARGET_CROPS <- c("Wheat","Maize","Soybean")
+
 normalize_win <- function(path,must_work=FALSE) normalizePath(path,winslash="/",mustWork=must_work)
-spacing_root <- SPACING_ROOT
+spacing_root <- normalize_win(SPACING_ROOT,TRUE)
 project_path <- file.path(spacing_root,"src","Spacing.Tool2","Spacing.Tool2.csproj")
-config_path <- file.path(spacing_root,"spacing.config.json")
-dll_debug <- file.path(spacing_root,"src","Spacing.Tool2","bin","Debug",TARGET_FRAMEWORK,"spacing-tool2.dll")
-dll_release <- file.path(spacing_root,"src","Spacing.Tool2","bin","Release",TARGET_FRAMEWORK,"spacing-tool2.dll")
-dll_candidates <- if (identical(tolower(BUILD_CONFIGURATION),"release")) c(dll_release,dll_debug) else c(dll_debug,dll_release)
-dll_found <- dll_candidates[file.exists(dll_candidates)]
-dll_path <- if(length(dll_found)) normalize_win(dll_found[[1L]],TRUE) else NA_character_
+dll_path <- file.path(spacing_root,"src","Spacing.Tool2","bin",BUILD_CONFIGURATION,TARGET_FRAMEWORK,"spacing-tool2.dll")
 if (!file.exists(project_path)) stop("Spacing.Tool2 project not found: ",project_path)
-if (!file.exists(config_path)) stop("spacing.config.json not found: ",config_path)
-if (is.na(dll_path)) stop("Spacing.Tool2 DLL not found. Checked: ",paste(dll_candidates,collapse="; "))
+if (!file.exists(dll_path)) stop("Spacing.Tool2 DLL not found: ",dll_path)
 if (!nzchar(Sys.which("dotnet"))) stop("dotnet was not found in the RStudio PATH")
 stopifnot(params$levels >= 2L, params$grid_jump >= 1L, params$grid_jump < params$levels)
-profile <- tolower(as.character(params$analysis_profile))
-if (!profile %in% c("smoke","full","custom")) stop("analysis_profile must be smoke, full, or custom")
-if (profile == "smoke" && as.integer(params$trajectories) != 2L) stop("Smoke profile requires trajectories = 2")
-if (profile == "full" && as.integer(params$trajectories) != 10L) stop("Full profile requires trajectories = 10")
-output_subdir <- as.character(params$output_subdir)
-if (!nzchar(output_subdir) || grepl("/", output_subdir, fixed=TRUE) || grepl("\\", output_subdir, fixed=TRUE)) stop("output_subdir must be one non-empty directory name")
+
 design_id <- paste0("morris5y_yield_biomass_",START_YEAR,"_",END_YEAR,
  "_r",params$trajectories,"_p",params$levels,"_j",params$grid_jump,
- "_s",params$seed,"_v114")
-analysis_root <- file.path(WORKSPACE_ROOT,"results",output_subdir,design_id)
-# A short execution path is retained directly under workspace runs to protect SQLite on Windows.
-execution_root <- file.path(WORKSPACE_ROOT,"runs",paste0("m114_",params$trajectories,"t"))
-log_root <- file.path(WORKSPACE_ROOT,"logs",output_subdir)
+ "_s",params$seed,"_v113")
+analysis_root <- file.path(spacing_root,"rSpacing_sensitivity",design_id)
+# APSIMx creates a SQLite DataStore beside the generated .apsimx file. On Windows,
+# long nested paths can produce SQLite Error 14 (unable to open database file).
+# Keep execution paths deliberately short; retain durable results in analysis_root.
+execution_root <- file.path(spacing_root,"_m513")
 dir.create(analysis_root,recursive=TRUE,showWarnings=FALSE)
-dir.create(log_root,recursive=TRUE,showWarnings=FALSE)
-if (dir.exists(execution_root) && length(list.files(execution_root,all.files=TRUE,no..=TRUE))) stop("Fresh-run requirement failed: v1.14 execution directory already contains files: ",execution_root)
+if (dir.exists(execution_root) && length(list.files(execution_root,all.files=TRUE,no..=TRUE))) stop("Fresh-run requirement failed: v1.13 execution directory already contains files: ",execution_root)
 dir.create(execution_root,recursive=TRUE,showWarnings=FALSE)
-runtime_configuration <- data.frame(
- field=c("analysis_profile","trajectories","workspace_root","rspacing_root","spacing_root","project_path","config_path","tool2_dll","execution_root","analysis_root","log_root","reuse_completed_runs"),
- value=c(profile,params$trajectories,WORKSPACE_ROOT,RSPACING_ROOT,SPACING_ROOT,project_path,config_path,dll_path,execution_root,analysis_root,log_root,as.character(params$reuse_completed_runs)),stringsAsFactors=FALSE)
-write.csv(runtime_configuration,file.path(log_root,"runtime_configuration.csv"),row.names=FALSE)
 ```
 
 # Execution paths
@@ -120,8 +98,8 @@ The durable analysis directory stores audits, rankings and the canonical fixture
 These paths are provenance and reliability information, not scientific results. A presentation can place them in a methods appendix, but they are important for reproducing the analysis.
 
 ```{r execution-paths}
-data.frame(path_role=c("Durable analysis and cache","Short APSIMx execution root","Persistent logs"),
- path=c(analysis_root,execution_root,log_root),characters=nchar(c(analysis_root,execution_root,log_root)),stringsAsFactors=FALSE)
+data.frame(path_role=c("Durable analysis and cache","Short APSIMx execution root"),
+ path=c(analysis_root,execution_root),characters=nchar(c(analysis_root,execution_root)),stringsAsFactors=FALSE)
 ```
 
 # Parameter catalogue
@@ -400,8 +378,8 @@ Use this table to explain computational cost. Each APSIMx run returns all six re
 ```{r runner-settings}
 all_parameter_spec <- do.call(rbind,parameter_catalogue); rownames(all_parameter_spec) <- NULL
 candidate_preflight_runs <- nrow(all_parameter_spec)
-data.frame(setting=c("Analysis profile","Trajectories","Execution root","Analysis root","Log root","Previous-result reuse","Mock weather","Candidate factors","Preflight runs","Baseline runs"),
- value=c(profile,params$trajectories,execution_root,analysis_root,log_root,"Disabled in v1.14",as.character(USE_MOCK_WEATHER),nrow(all_parameter_spec),candidate_preflight_runs,1L),stringsAsFactors=FALSE)
+data.frame(setting=c("Execution root","Analysis root","Previous-result reuse","Mock weather","Candidate factors","Preflight runs","Baseline runs"),
+ value=c(execution_root,analysis_root,"Disabled in v1.13",as.character(USE_MOCK_WEATHER),nrow(all_parameter_spec),candidate_preflight_runs,1L),stringsAsFactors=FALSE)
 ```
 
 ### What the APSIMx runner does
@@ -423,7 +401,7 @@ run_apsim_multivariate <- function(run_index,overrides_by_crop=NULL,run_kind="mo
  run_id <- paste0("a",run_code); run_dir <- file.path(execution_root,run_id); output_dir <- file.path(run_dir,"o"); weather_dir <- file.path(run_dir,"w")
  cache_dir <- file.path(analysis_root,"all_cultivars","cache"); dir.create(output_dir,recursive=TRUE,showWarnings=FALSE); dir.create(weather_dir,recursive=TRUE,showWarnings=FALSE); dir.create(cache_dir,recursive=TRUE,showWarnings=FALSE)
  request_path <- file.path(run_dir,"q.json"); config_path <- file.path(run_dir,"c.json"); result_path <- file.path(output_dir,"r.json"); manifest_path <- file.path(output_dir,"m.json"); stdout_path <- file.path(output_dir,"out.log"); stderr_path <- file.path(output_dir,"err.log")
- cache_path <- file.path(cache_dir,paste0(run_code,"_v114.rds"))
+ cache_path <- file.path(cache_dir,paste0(run_code,"_v113.rds"))
  crops <- base_crops
  if(!is.null(overrides_by_crop)) for(i in seq_along(crops)) { crop_name<-crops[[i]]$name; if(!is.null(overrides_by_crop[[crop_name]])) crops[[i]]$parameter_overrides<-overrides_by_crop[[crop_name]] }
  request <- list(id="m5all",name="M5all",run_id=run_id,metadata=list(source="R Markdown",method="Morris multivariate target",design_id=design_id,run_kind=run_kind,run_index=as.character(run_index),target_crops=paste(TARGET_CROPS,collapse=",")),mock=isTRUE(USE_MOCK_WEATHER),calibrate=FALSE,lat=LATITUDE,lon=LONGITUDE,cell_id=CELL_ID,start_year=START_YEAR,end_year=END_YEAR,soil_profile=soil_profile,result_file=normalize_win(result_path,FALSE),manifest_file=normalize_win(manifest_path,FALSE),crops=crops,cycles=5L)
@@ -439,14 +417,14 @@ run_apsim_multivariate <- function(run_index,overrides_by_crop=NULL,run_kind="mo
  model_success<-!is.null(result)&&isTRUE(result$success)
  if(!model_success) {
   reason<-if(nzchar(stderr_text)) stderr_text else if(nzchar(stdout_text)) stdout_text else paste("Spacing.Tool2 exit code",exit_status)
-  out<-list(schema_version="1.14",model_success=FALSE,yield_wheat=NA_real_,yield_maize=NA_real_,yield_soybean=NA_real_,biomass_wheat=NA_real_,biomass_maize=NA_real_,biomass_soybean=NA_real_,biomass_sources=biomass_sources,run_index=run_index,run_kind=run_kind,run_id=run_id,reason=reason,exit_status=as.integer(exit_status),stderr_path=stderr_path,stdout_path=stdout_path,result_path=result_path,elapsed_seconds=elapsed)
+  out<-list(schema_version="1.13",model_success=FALSE,yield_wheat=NA_real_,yield_maize=NA_real_,yield_soybean=NA_real_,biomass_wheat=NA_real_,biomass_maize=NA_real_,biomass_soybean=NA_real_,biomass_sources=biomass_sources,run_index=run_index,run_kind=run_kind,run_id=run_id,reason=reason,exit_status=as.integer(exit_status),stderr_path=stderr_path,stdout_path=stdout_path,result_path=result_path,elapsed_seconds=elapsed)
   saveRDS(out,cache_path); return(out)
  }
  tables<-read_all_tables(result); yields<-stats::setNames(lapply(TARGET_CROPS,function(crop) extract_yield(result,crop)),TARGET_CROPS)
  candidate_rows<-if(run_kind=="baseline") do.call(rbind,lapply(TARGET_CROPS,function(crop) biomass_candidates(tables,crop))) else data.frame()
  locked<-biomass_sources; if(run_kind=="baseline"&&is.null(locked)) locked<-stats::setNames(lapply(TARGET_CROPS,function(crop) choose_biomass_source(biomass_candidates(tables,crop),crop)),TARGET_CROPS)
  bb<-stats::setNames(lapply(TARGET_CROPS,function(crop) extract_biomass_locked(tables,locked[[crop]])),TARGET_CROPS)
- out<-list(schema_version="1.14",model_success=TRUE,yield_wheat=scalar_num(yields$Wheat$value),yield_maize=scalar_num(yields$Maize$value),yield_soybean=scalar_num(yields$Soybean$value),biomass_wheat=scalar_num(bb$Wheat$value),biomass_maize=scalar_num(bb$Maize$value),biomass_soybean=scalar_num(bb$Soybean$value),biomass_sources=locked,biomass_candidates=candidate_rows,output_inventory=if(run_kind=="baseline") output_column_inventory(tables) else data.frame(),run_index=run_index,run_kind=run_kind,run_id=run_id,reason=if(all(vapply(bb,function(z)isTRUE(z$available),logical(1)))) "" else paste(vapply(bb,function(z)scalar_chr(z$reason,"Biomass unavailable"),character(1)),collapse="; "),exit_status=as.integer(exit_status),stderr_path=stderr_path,stdout_path=stdout_path,result_path=result_path,elapsed_seconds=elapsed)
+ out<-list(schema_version="1.13",model_success=TRUE,yield_wheat=scalar_num(yields$Wheat$value),yield_maize=scalar_num(yields$Maize$value),yield_soybean=scalar_num(yields$Soybean$value),biomass_wheat=scalar_num(bb$Wheat$value),biomass_maize=scalar_num(bb$Maize$value),biomass_soybean=scalar_num(bb$Soybean$value),biomass_sources=locked,biomass_candidates=candidate_rows,output_inventory=if(run_kind=="baseline") output_column_inventory(tables) else data.frame(),run_index=run_index,run_kind=run_kind,run_id=run_id,reason=if(all(vapply(bb,function(z)isTRUE(z$available),logical(1)))) "" else paste(vapply(bb,function(z)scalar_chr(z$reason,"Biomass unavailable"),character(1)),collapse="; "),exit_status=as.integer(exit_status),stderr_path=stderr_path,stdout_path=stdout_path,result_path=result_path,elapsed_seconds=elapsed)
  saveRDS(out,cache_path); out
 }
 ```
@@ -532,36 +510,12 @@ show_table(preflight_audit,100)
 ## Validated Morris run plan
 ### How to read the validated run plan
 
-The table counts candidate, accepted and rejected factors and translates the validated factor count into the required Morris simulations. With `r` trajectories and `k` accepted factors, the Morris component requires `$r \times (k + 1)$` runs. Baseline and preflight executions are then added to obtain total physical runs.
+The table counts candidate, accepted and rejected factors and translates the validated factor count into the required Morris simulations. With `r` trajectories and `k` accepted factors, the Morris component requires `r × (k + 1)` runs. Baseline and preflight executions are then added to obtain total physical runs.
 
 This table is the authoritative computational plan for the current execution. It may differ from the original 24-factor expectation because invalid override paths are excluded before design construction.
 
 ```{r preflight-run-plan}
 show_table(run_plan,20)
-```
-
-## Planned computation time
-
-The validated run plan is the authoritative workload. Physical APSIMx runs equal one baseline, one preflight run for every candidate factor, and `trajectories * (accepted factors + 1)` Morris runs. With 24 candidates and 16 accepted factors, the smoke profile requires 59 physical runs and the full 10-trajectory profile requires 195. Actual totals are recalculated after preflight. No fixed wall-clock duration is assumed before execution; the report derives an empirical estimate from observed run durations on the current workstation.
-
-```{r planned-computation-time}
-planned_computation <- data.frame(
-  analysis_profile = profile,
-  candidate_factors = run_plan$candidate_factors,
-  accepted_factors = run_plan$accepted_factors,
-  trajectories = as.integer(params$trajectories),
-  baseline_runs = run_plan$baseline_runs,
-  preflight_runs = run_plan$preflight_runs,
-  morris_runs = run_plan$morris_runs,
-  planned_physical_APSIMx_runs = run_plan$total_physical_runs,
-  stringsAsFactors = FALSE
-)
-planned_computation
-write.csv(
-  planned_computation,
-  file.path(analysis_root, "planned_computation.csv"),
-  row.names = FALSE
-)
 ```
 # Unified Morris design and runs
 
@@ -582,8 +536,8 @@ for(i in seq_len(nrow(X))) {
 run_table<-do.call(rbind,response_rows); complete<-is.finite(score); results_dir<-file.path(analysis_root,"all_cultivars","results"); dir.create(results_dir,recursive=TRUE,showWarnings=FALSE); write.csv(run_table,file.path(results_dir,"multivariate_runs.csv"),row.names=FALSE)
 if(!all(complete)) { write.csv(run_table[!complete,,drop=FALSE],file.path(results_dir,"multivariate_runs_incomplete.csv"),row.names=FALSE); indices<-data.frame(); status<-data.frame(status="incomplete",runs=nrow(X),complete=sum(complete),failed_or_missing=sum(!complete),reason="At least one validated-design response vector is incomplete")
 } else { told<-sensitivity::tell(design,score); ee<-told$ee; indices<-data.frame(crop=valid_parameter_spec$crop,role=valid_parameter_spec$role,parameter=valid_parameter_spec$parameter,lower=valid_parameter_spec$lower,upper=valid_parameter_spec$upper,default_reported=valid_parameter_spec$default_reported,mu=apply(ee,2,mean,na.rm=TRUE),mu_star=apply(abs(ee),2,mean,na.rm=TRUE),sigma=apply(ee,2,stats::sd,na.rm=TRUE),stringsAsFactors=FALSE); indices$rank_global<-rank(-indices$mu_star,ties.method="min"); indices<-indices[order(indices$rank_global,-indices$sigma),]; write.csv(indices,file.path(results_dir,"morris_multivariate_global_ranking.csv"),row.names=FALSE); write.csv(indices,file.path(results_dir,"morris_indices.csv"),row.names=FALSE); status<-data.frame(status="complete",runs=nrow(X),complete=nrow(X),failed_or_missing=0L,reason="One multivariate target and one global ranking") }
-canonical_fixture<-list(schema_version="1.14",created=Sys.time(),design_id=design_id,analysis_profile=profile,runtime_configuration=runtime_configuration,target_definition=list(response_names=response_names,weights=response_weights,formula="weighted RMS of normalized deviations from the common baseline"),baseline=baseline,baseline_diagnostics=baseline_diagnostics,preflight=preflight_audit,valid_parameter_spec=valid_parameter_spec,run_plan=run_plan,design=X,runs=run_table,status=status,indices=indices)
-fixture_path<-file.path(analysis_root,"morris_multivariate_all_cultivars_fixture_v114.rds"); saveRDS(canonical_fixture,fixture_path)
+canonical_fixture<-list(schema_version="1.13",created=Sys.time(),design_id=design_id,target_definition=list(response_names=response_names,weights=response_weights,formula="weighted RMS of normalized deviations from the common baseline"),baseline=baseline,baseline_diagnostics=baseline_diagnostics,preflight=preflight_audit,valid_parameter_spec=valid_parameter_spec,run_plan=run_plan,design=X,runs=run_table,status=status,indices=indices)
+fixture_path<-file.path(analysis_root,"morris_multivariate_all_cultivars_fixture_v113.rds"); saveRDS(canonical_fixture,fixture_path)
 ```
 
 ## Unified run status
@@ -596,44 +550,6 @@ This table should be presented before the ranking. A visually plausible ranking 
 
 ```{r run-status}
 show_table(status,100)
-```
-
-## Measured and projected computation time
-
-The runner records elapsed seconds for the baseline, every preflight run, and every Morris run. The table below reports measured APSIMx time and projects the full 10-trajectory workload from the observed mean seconds per physical run. This is an empirical planning value for the current workstation, not a guaranteed duration on another computer.
-
-```{r measured-computation-time}
-baseline_seconds <- scalar_num(baseline$elapsed_seconds, NA_real_)
-preflight_seconds <- suppressWarnings(as.numeric(preflight_audit$elapsed_seconds))
-morris_seconds <- suppressWarnings(as.numeric(run_table$elapsed_seconds))
-all_elapsed_seconds <- c(baseline_seconds, preflight_seconds, morris_seconds)
-all_elapsed_seconds <- all_elapsed_seconds[is.finite(all_elapsed_seconds)]
-observed_run_count <- length(all_elapsed_seconds)
-mean_seconds_per_run <- if (observed_run_count) mean(all_elapsed_seconds) else NA_real_
-measured_APSIMx_hours <- if (observed_run_count) sum(all_elapsed_seconds) / 3600 else NA_real_
-full_morris_runs <- 10L * (nrow(valid_parameter_spec) + 1L)
-full_total_physical_runs <- 1L + nrow(all_parameter_spec) + full_morris_runs
-projected_full_hours <- if (is.finite(mean_seconds_per_run)) {
-  full_total_physical_runs * mean_seconds_per_run / 3600
-} else {
-  NA_real_
-}
-computation_time <- data.frame(
-  analysis_profile = profile,
-  observed_physical_runs = observed_run_count,
-  mean_seconds_per_run = mean_seconds_per_run,
-  measured_APSIMx_hours = measured_APSIMx_hours,
-  full_profile_trajectories = 10L,
-  projected_full_physical_runs = full_total_physical_runs,
-  projected_full_hours = projected_full_hours,
-  stringsAsFactors = FALSE
-)
-computation_time
-write.csv(
-  computation_time,
-  file.path(analysis_root, "computation_time_estimate.csv"),
-  row.names = FALSE
-)
 ```
 
 ## Multivariate response inventory
@@ -664,15 +580,15 @@ show_table(run_table[!is.finite(run_table$multivariate_score),,drop=FALSE],250)
 
 ### Why the canonical Morris fixture is reloaded
 
-After execution, this hidden block reads the saved v1.14 fixture and verifies its schema. Tables and plots below are therefore generated from a fixed analytical object containing the design, baseline, preflight, runs and indices.
+After execution, this hidden block reads the saved v1.13 fixture and verifies its schema. Tables and plots below are therefore generated from a fixed analytical object containing the design, baseline, preflight, runs and indices.
 
 This makes the reporting stage auditable and prevents later chunks from silently using transient objects that differ from the saved analysis.
 
 ```{r load-fixture, include=FALSE}
-fixture_path <- file.path(analysis_root,"morris_multivariate_all_cultivars_fixture_v114.rds")
+fixture_path <- file.path(analysis_root,"morris_multivariate_all_cultivars_fixture_v113.rds")
 if (!file.exists(fixture_path)) stop("Canonical fixture not found: ",fixture_path)
 fixture <- readRDS(fixture_path)
-stopifnot(identical(fixture$schema_version,"1.14"))
+stopifnot(identical(fixture$schema_version,"1.13"))
 indices <- fixture$indices
 run_table <- fixture$runs
 ```
@@ -746,33 +662,8 @@ print(ggplot(long_components,aes(run_index,normalized_response,colour=component)
 
 The final table records the canonical fixture and analysis directory. The fixture is the complete reproducible object for the design, execution audit and ranking; the directory contains CSV diagnostics and result files.
 
-For archiving or presenting the study, retain the Rmd, fixture, preflight audit, run inventory and Morris indices together. The temporary workspace `runs/m114_*` execution tree is useful for troubleshooting but is not a substitute for the durable analytical outputs.
+For archiving or presenting the study, retain the Rmd, fixture, preflight audit, run inventory and Morris indices together. The temporary `_m513` execution tree is useful for troubleshooting but is not a substitute for the durable analytical outputs.
 
 ```{r files}
-data.frame(analysis_profile=profile,fixture=fixture_path,analysis_directory=analysis_root,
- execution_directory=execution_root,log_directory=log_root,runtime_configuration=file.path(log_root,"runtime_configuration.csv"),stringsAsFactors=FALSE)
-```
-
-
-# Total document elapsed time
-
-The final table reports the complete R Markdown elapsed time, including configuration, model execution, output extraction, sensitivity calculations, and graphics.
-
-```{r total-document-time}
-TOTAL_DOCUMENT_ELAPSED_SECONDS <- as.numeric(
-  difftime(Sys.time(), DOCUMENT_STARTED_AT, units = "secs")
-)
-document_time <- data.frame(
-  analysis_profile = profile,
-  total_render_seconds = TOTAL_DOCUMENT_ELAPSED_SECONDS,
-  total_render_minutes = TOTAL_DOCUMENT_ELAPSED_SECONDS / 60,
-  total_render_hours = TOTAL_DOCUMENT_ELAPSED_SECONDS / 3600,
-  stringsAsFactors = FALSE
-)
-document_time
-write.csv(
-  document_time,
-  file.path(analysis_root, "document_elapsed_time.csv"),
-  row.names = FALSE
-)
+data.frame(fixture=fixture_path,analysis_directory=analysis_root,stringsAsFactors=FALSE)
 ```
