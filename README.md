@@ -10,17 +10,19 @@ rSpacing_workspace/
 ├── TEST_PROTOCOL.md
 ├── environment_check.R
 ├── setup_workspace.ps1
-├── rSpacing/          # copy/clone of the R package in the rSpacing repository, version 0.10.05
-├── apsim/             # copy/clone of the apsim/ folder in the APSIMxSpacing C# repository, version 0.09.05
-├── workflows/         # writable copies of operational Rmd files (created automatically during setup)
-├── runs/              # temporary APSIMx runs; not versioned (created automatically during setup)
-├── results/           # persistent tables, figures, fixtures, rankings (created automatically during setup)
-└── logs/              # environment, build and test logs (created automatically during setup)
+├── rSpacing/          # R package repository, version 0.10.05
+├── apsim/             # APSIMxSpacing C# repository, Spacing.Tool2 version 0.09.05
+├── workflows/         # writable copies of operational Rmd files
+├── runs/              # temporary APSIMx runs; not versioned
+├── results/           # persistent tables, figures, fixtures, and rankings
+└── logs/              # environment, build, and test logs
 ```
 
-Do not put `runs`, `results`, or `logs` inside either repository.
+Do not place `runs/`, `results/`, or `logs/` inside either repository.
 
-## Repositories to record before testing
+## Repository references
+
+Complete the commit fields before final delivery.
 
 ```text
 rSpacing repository URL: https://github.com/mauriziobagnara/rSpacing
@@ -39,7 +41,7 @@ Expected runtime version: 0.09.05
 1. Place or clone the R repository as `rSpacing`.
 2. Place or clone the C# repository as `apsim`.
 3. Open PowerShell in the workspace root.
-4. Run:
+4. Prepare the workspace:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\setup_workspace.ps1
@@ -51,11 +53,15 @@ powershell -ExecutionPolicy Bypass -File .\setup_workspace.ps1
 source("environment_check.R")
 ```
 
-6. Do not continue if `logs/environment_check.csv` contains a failed required check.
+6. Do not continue if a check marked `required = TRUE` fails in:
+
+```text
+logs/environment_check.csv
+```
 
 ## Compile Spacing.Tool2
 
-Open PowerShell in the workspace root and run: 
+Open PowerShell in the workspace root and run:
 
 ```powershell
 dotnet restore .\apsim\src\Spacing.Tool2\Spacing.Tool2.csproj 2>&1 |
@@ -67,20 +73,23 @@ dotnet build .\apsim\src\Spacing.Tool2\Spacing.Tool2.csproj `
   Tee-Object .\logs\dotnet_build.log
 ```
 
-Expected DLL:
+Expected Debug DLL:
 
 ```text
 apsim/src/Spacing.Tool2/bin/Debug/net8.0/spacing-tool2.dll
 ```
 
-The environment checker also accepts a Release build at:
+The workspace also accepts a Release build at:
 
 ```text
 apsim/src/Spacing.Tool2/bin/Release/net8.0/spacing-tool2.dll
 ```
-### Install rSpacing package directly from the package source
 
-From the workspace root:
+## Install rSpacing and build the vignette
+
+The `.Rproj` file is not installed. It only opens the workspace as an RStudio project and sets the working directory.
+
+From the workspace root, install directly from the package source with vignette construction enabled:
 
 ```r
 workspace_root <- normalizePath(
@@ -109,51 +118,166 @@ devtools::install(
 )
 ```
 
-Restart R after installation, then verify the package and open the vignette:
+Restart R and verify:
 
 ```r
 library(rSpacing)
 
 packageVersion("rSpacing")
-
 vignette(package = "rSpacing")
-
 vignette(
   "rSpacing-workflow_EN",
   package = "rSpacing"
 )
 ```
 
-The expected package version is:
+Expected package version:
 
 ```text
 0.10.05 or 0.10.5
 ```
 
-## Copy operational workflows
+### Recommended clean installation from a source tarball
 
-The package distributes the operational R Markdown files under `rSpacing/inst/rmarkdown/`. Copy them to the writable `workflows/` directory before execution:
+For the final delivery test, build and install the source tarball:
 
 ```r
-source_dir <- file.path("rSpacing", "inst", "rmarkdown")
-files <- list.files(source_dir, pattern = "[.]Rmd$", full.names = TRUE)
-stopifnot(length(files) > 0L)
-ok <- file.copy(files, "workflows", overwrite = FALSE)
-if (!all(ok)) stop("One or more workflows already exist or could not be copied.")
+workspace_root <- normalizePath(
+  ".",
+  winslash = "/",
+  mustWork = TRUE
+)
+
+package_root <- file.path(
+  workspace_root,
+  "rSpacing"
+)
+
+tarball <- devtools::build(
+  pkg = package_root,
+  vignettes = TRUE,
+  manual = FALSE
+)
+
+install.packages(
+  tarball,
+  repos = NULL,
+  type = "source"
+)
 ```
 
-Do not execute the Rmd files inside the package source tree or installed R library.
+Restart R and verify:
+
+```r
+library(rSpacing)
+
+stopifnot(
+  packageVersion("rSpacing") ==
+    numeric_version("0.10.05")
+)
+
+vignette(package = "rSpacing")
+vignette(
+  "rSpacing-workflow_EN",
+  package = "rSpacing"
+)
+```
+
+### Build only the vignette
+
+```r
+tools::buildVignettes(
+  dir = file.path(
+    normalizePath(
+      ".",
+      winslash = "/",
+      mustWork = TRUE
+    ),
+    "rSpacing"
+  )
+)
+```
+
+### Diagnose a missing installed vignette
+
+```r
+pkg <- find.package("rSpacing")
+
+file.exists(
+  file.path(pkg, "Meta", "vignette.rds")
+)
+
+list.files(
+  file.path(pkg, "doc"),
+  recursive = TRUE,
+  full.names = TRUE
+)
+```
+
+The expected result is:
+
+- `Meta/vignette.rds` exists;
+- the installed `doc/` directory contains the rendered vignette;
+- `vignette("rSpacing-workflow_EN", package = "rSpacing")` opens the manual.
+
+## Copy operational workflows
+
+The package distributes operational R Markdown files under `rSpacing/inst/rmarkdown/`. Copy them to the writable `workflows/` directory before execution:
+
+```r
+workspace_root <- normalizePath(
+  ".",
+  winslash = "/",
+  mustWork = TRUE
+)
+
+source_dir <- file.path(
+  workspace_root,
+  "rSpacing",
+  "inst",
+  "rmarkdown"
+)
+
+target_dir <- file.path(
+  workspace_root,
+  "workflows"
+)
+
+files <- list.files(
+  source_dir,
+  pattern = "[.]Rmd$",
+  full.names = TRUE
+)
+
+stopifnot(length(files) > 0L)
+dir.create(target_dir, recursive = TRUE, showWarnings = FALSE)
+
+ok <- file.copy(
+  files,
+  target_dir,
+  overwrite = FALSE
+)
+
+if (!all(ok)) {
+  stop(
+    "One or more workflows already exist or could not be copied."
+  )
+}
+```
+
+Do not execute operational Rmd files inside the package source tree or installed R library.
 
 ## Test order
 
 1. Environment check.
 2. C# restore and build.
-3. R package documentation, tests, vignette and check.
-4. Full-function manual with model execution disabled.
-5. Full-function manual with model execution enabled.
-6. Five-year workflow.
-7. Morris smoke test with 2 trajectories.
-8. Input-uncertainty smoke test with 30 samples and 50 bootstrap replicates.
-9. Full analyses only after all smoke tests pass.
+3. R package documentation, tests, vignette, and check.
+4. Clean source-tarball installation and installed vignette.
+5. Full-function manual without model execution.
+6. Full-function manual with model execution.
+7. Five-year workflow.
+8. Morris smoke test, then full Morris analysis.
+9. Input-uncertainty smoke test, then full uncertainty analysis.
+10. Final test report.
 
-Follow `TEST_PROTOCOL.md` and do not change R or C# source code during the first test cycle.
+The detailed criteria, evidence requirements, and stop conditions are defined in `TEST_PROTOCOL.md`.
