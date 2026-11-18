@@ -1,5 +1,5 @@
 ---
-title: "rSpacing/APSIMx: five-year Wheat-Maize-Soybean workflow and report, v1.04 EN"
+title: "rSpacing/APSIMx: five-year Wheat-Maize-Soybean workflow and report, v1.05 EN"
 author: "Maurizio Bagnara"
 date: "`r format(Sys.Date(), '%d %B %Y')`"
 output:
@@ -9,8 +9,12 @@ output:
     number_sections: true
     df_print: paged
 params:
+  workspace_root: ".."
   build_fixture: true
-  fixture_path: "rSpacing_APSIMx_5year_fixture.rds"
+  fixture_path: null
+  output_subdir: "five_year_v105"
+  build_configuration: "Debug"
+  target_framework: "net8.0"
   show_rows: 25
 ---
 
@@ -21,12 +25,73 @@ This block prepares the report environment. It applies common formatting to all 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(collapse=TRUE, comment="#>", warning=FALSE, message=FALSE,
                       fig.width=10, fig.height=6)
+required_packages <- c("jsonlite", "ggplot2")
+missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly=TRUE)]
+if (length(missing_packages)) stop("Missing R packages: ", paste(missing_packages, collapse=", "))
 library(ggplot2)
+DOCUMENT_STARTED_AT <- Sys.time()
+MODEL_RUN_ELAPSED_SECONDS <- NA_real_
+
+normalize_win <- function(path, must_work=FALSE) {
+  normalizePath(path, winslash="/", mustWork=must_work)
+}
+WORKSPACE_ROOT <- normalize_win(params$workspace_root, TRUE)
+RSPACING_ROOT <- normalize_win(file.path(WORKSPACE_ROOT, "rSpacing"), TRUE)
+SPACING_ROOT <- normalize_win(file.path(WORKSPACE_ROOT, "apsim"), TRUE)
+OUTPUT_SUBDIR <- as.character(params$output_subdir)
+if (!nzchar(OUTPUT_SUBDIR) || grepl("/", OUTPUT_SUBDIR, fixed = TRUE) || grepl("\\", OUTPUT_SUBDIR, fixed = TRUE)) {
+  stop("params$output_subdir must be one non-empty directory name.")
+}
+WORK_ROOT <- file.path(WORKSPACE_ROOT, "runs", OUTPUT_SUBDIR)
+OUTPUT_ROOT <- file.path(WORKSPACE_ROOT, "results", OUTPUT_SUBDIR)
+LOG_ROOT <- file.path(WORKSPACE_ROOT, "logs", OUTPUT_SUBDIR)
+for (path in c(WORK_ROOT, OUTPUT_ROOT, LOG_ROOT)) dir.create(path, recursive=TRUE, showWarnings=FALSE)
+
+BUILD_CONFIGURATION <- as.character(params$build_configuration)
+TARGET_FRAMEWORK <- as.character(params$target_framework)
+PROJECT_PATH <- file.path(SPACING_ROOT, "src", "Spacing.Tool2", "Spacing.Tool2.csproj")
+CONFIG_PATH <- file.path(SPACING_ROOT, "spacing.config.json")
+DLL_DEBUG <- file.path(SPACING_ROOT, "src", "Spacing.Tool2", "bin", "Debug", TARGET_FRAMEWORK, "spacing-tool2.dll")
+DLL_RELEASE <- file.path(SPACING_ROOT, "src", "Spacing.Tool2", "bin", "Release", TARGET_FRAMEWORK, "spacing-tool2.dll")
+DLL_CANDIDATES <- if (identical(tolower(BUILD_CONFIGURATION), "release")) c(DLL_RELEASE,DLL_DEBUG) else c(DLL_DEBUG,DLL_RELEASE)
+DLL_FOUND <- DLL_CANDIDATES[file.exists(DLL_CANDIDATES)]
+dll_path <- if (length(DLL_FOUND)) normalize_win(DLL_FOUND[[1L]], TRUE) else NA_character_
+
+if (isTRUE(params$build_fixture)) {
+  if (!file.exists(PROJECT_PATH)) stop("Spacing.Tool2 project not found: ", PROJECT_PATH)
+  if (!file.exists(CONFIG_PATH)) stop("spacing.config.json not found: ", CONFIG_PATH)
+  if (!nzchar(Sys.which("dotnet"))) stop("dotnet was not found in the RStudio PATH")
+  if (is.na(dll_path)) stop("Spacing.Tool2 DLL was not found. Checked: ", paste(DLL_CANDIDATES, collapse="; "))
+}
+
+fixture_path <- if (is.null(params$fixture_path) || !nzchar(as.character(params$fixture_path))) {
+  file.path(OUTPUT_ROOT, "rSpacing_APSIMx_5year_fixture.rds")
+} else if (grepl("^([A-Za-z]:|/|\\)", as.character(params$fixture_path))) {
+  normalize_win(as.character(params$fixture_path), FALSE)
+} else {
+  file.path(WORKSPACE_ROOT, as.character(params$fixture_path))
+}
+
+runtime_configuration <- data.frame(
+  field=c("workspace_root","rspacing_root","spacing_root","project_path","config_path","tool2_dll","work_root","output_root","log_root","fixture_path","build_fixture"),
+  value=c(WORKSPACE_ROOT,RSPACING_ROOT,SPACING_ROOT,PROJECT_PATH,CONFIG_PATH,
+          if(is.na(dll_path)) "NOT FOUND" else dll_path,WORK_ROOT,OUTPUT_ROOT,LOG_ROOT,fixture_path,as.character(params$build_fixture)),
+  stringsAsFactors=FALSE
+)
+utils::write.csv(runtime_configuration,file.path(LOG_ROOT,"runtime_configuration.csv"),row.names=FALSE)
+```
+
+# Resolved workspace and runtime
+
+The table records the exact repositories, selected Debug or Release DLL, run directory, result directory, log directory, and canonical fixture path. This is the provenance record for the report and should be retained with the final outputs.
+
+```{r runtime-configuration}
+runtime_configuration
 ```
 
 # Run execution and fixture construction
 
-The document contains the complete five-year script. With `params$build_fixture = true`, it runs `Spacing.Tool2`, normalizes the outputs, and saves the canonical fixture. When the parameter is set to `false`, it reuses the existing fixture without rerunning APSIMx.
+The document contains the complete five-year script. All paths are derived from the shared workspace containing sibling `rSpacing/` and `apsim/` repositories. With `params$build_fixture = true`, it runs `Spacing.Tool2`, normalizes the outputs, and saves the canonical fixture under the workspace `results/` tree. When the parameter is set to `false`, it reuses the selected fixture without rerunning APSIMx.
 
 ### What the canonical-fixture builder does
 
@@ -38,7 +103,7 @@ The code is hidden because it is long and primarily implements the workflow. For
 # ==============================================================================
 # rSpacing -> Spacing.Tool2 -> APSIMx
 # Complete RStudio demo without crop-parameter changes
-# Version v1.03: tables and plots returned to RStudio and saved as external files
+# Version v1.05: workspace-relative execution, tables and plots returned to RStudio
 #
 # Scenario:
 #   - coordinate: Gualtieri (RE), 44.9000 N, 10.6300 E
@@ -53,10 +118,10 @@ The code is hidden because it is long and primarily implements the workflow. For
 #   - results returned as an R object and read from JSON, CSV, and SQLite
 #
 # USE IN RSTUDIO
-#   1. Open this file.
-#   2. Change only SPACING_ROOT if the solution is stored in another folder.
-#   3. Run Source.
-#   4. Results will be available in the global rspacing_demo object.
+#   1. Copy this file to <workspace>/workflows/.
+#   2. Render with workspace_root = "..".
+#   3. Keep build_fixture = TRUE for a new run or FALSE to reuse the fixture.
+#   4. Results will be available in the canonical fixture and report.
 # ============================================================================== 
 
 
@@ -64,9 +129,6 @@ The code is hidden because it is long and primarily implements the workflow. For
 # 1. Local configuration
 # ----------------------------------------------------------------------------  
 
-SPACING_ROOT <- "C:/Users/maurizio.bagnara/Documents/spacing-main/apsim"
-BUILD_CONFIGURATION <- "Debug"
-TARGET_FRAMEWORK <- "net8.0"
 USE_MOCK_WEATHER <- TRUE
 
 START_YEAR <- 2020L
@@ -105,47 +167,15 @@ has_rsqlite <- requireNamespace("RSQLite", quietly = TRUE)
 # 3. Locate and verify Spacing.Tool2
 # ----------------------------------------------------------------------------  
 
-normalize_win <- function(path, must_work = FALSE) {
-  normalizePath(path, winslash = "/", mustWork = must_work)
-}
-
-spacing_root <- normalize_win(SPACING_ROOT, must_work = TRUE)
-project_path <- file.path(spacing_root, "src", "Spacing.Tool2", "Spacing.Tool2.csproj")
-dll_path <- file.path(
-  spacing_root,
-  "src", "Spacing.Tool2", "bin", BUILD_CONFIGURATION,
-  TARGET_FRAMEWORK, "spacing-tool2.dll"
-)
-
-if (!file.exists(project_path)) {
-  stop("Progetto Spacing.Tool2 non trovato: ", project_path, call. = FALSE)
-}
-
-if (!file.exists(dll_path)) {
-  stop(
-    paste0(
-      "DLL compilata non trovata:\n", dll_path, "\n\n",
-      "Aprire spacing.sln in Visual Studio 2026, impostare ",
-      BUILD_CONFIGURATION, " | Any CPU e selezionare ",
-      "Compilazione > Ricompila soluzione."
-    ),
-    call. = FALSE
-  )
-}
-
-if (!nzchar(Sys.which("dotnet"))) {
-  stop(
-    "dotnet non trovato nel PATH di RStudio. Riavviare RStudio dopo ",
-    "l'installazione del .NET SDK usato da Visual Studio 2026.",
-    call. = FALSE
-  )
-}
+spacing_root <- SPACING_ROOT
+project_path <- PROJECT_PATH
+# dll_path was selected in setup from Debug/Release candidates.
 
 # ----------------------------------------------------------------------------  
 # 4. Isolated run directories
 # ----------------------------------------------------------------------------  
 
-runs_root <- file.path(spacing_root, "rSpacing_runs")
+runs_root <- WORK_ROOT
 run_dir <- file.path(runs_root, RUN_ID)
 output_dir <- file.path(run_dir, "output")
 weather_dir <- file.path(run_dir, "weather")
@@ -387,12 +417,16 @@ if (isTRUE(USE_MOCK_WEATHER)) {
 message("Esecuzione di Spacing.Tool2...")
 message("Run directory: ", normalize_win(run_dir, must_work = TRUE))
 
+model_run_started_at <- Sys.time()
 exit_status <- system2(
   command = "dotnet",
   args = args,
   stdout = stdout_path,
   stderr = stderr_path,
   wait = TRUE
+)
+MODEL_RUN_ELAPSED_SECONDS <- as.numeric(
+  difftime(Sys.time(), model_run_started_at, units = "secs")
 )
 
 stdout_text <- if (file.exists(stdout_path)) {
@@ -401,6 +435,8 @@ stdout_text <- if (file.exists(stdout_path)) {
 stderr_text <- if (file.exists(stderr_path)) {
   paste(readLines(stderr_path, warn = FALSE), collapse = "\n")
 } else ""
+file.copy(stdout_path, file.path(LOG_ROOT, paste0(RUN_ID, "_stdout.log")), overwrite=TRUE)
+file.copy(stderr_path, file.path(LOG_ROOT, paste0(RUN_ID, "_stderr.log")), overwrite=TRUE)
 
 if (!identical(as.integer(exit_status), 0L)) {
   stop(
@@ -971,7 +1007,7 @@ invisible(rspacing_demo)
 # Fixture builder version: v1.00
 # ==============================================================================
 
-canonical_output_path <- file.path(getwd(), "rSpacing_APSIMx_5year_fixture.rds")
+canonical_output_path <- fixture_path
 
 safe_date <- function(x) {
   if (inherits(x, "Date")) return(x)
@@ -1230,9 +1266,9 @@ soil_profile_table$OC_stock_kg_ha <- with(soil_profile_table,
   OC / 100 * BD * 1000 * (DepthBottom - DepthTop) / 100 * 10000)
 
 canonical_fixture <- list(
-  schema_version = "1.00",
+  schema_version = "1.05",
   created = Sys.time(),
-  source_script = "rSpacing_APSIMx_5year_three_crops_tables_plots_v1.03.R",
+  source_script = "rSpacing_APSIMx_5year_workflow_report_v1.05_EN.Rmd",
   model = list(tool = "Spacing.Tool2", version = "0.09.05", mock_weather = USE_MOCK_WEATHER,
                start_year = START_YEAR, end_year = END_YEAR, success = isTRUE(rspacing_demo$success)),
   rotation_yearly = rotation_yearly,
@@ -1259,7 +1295,6 @@ This block loads the canonical RDS fixture and verifies its required fields. Onc
 If this block fails, the problem is not a scientific result. It means that the fixture is missing, has been moved, or does not contain the expected schema.
 
 ```{r load-canonical-fixture, include=FALSE}
-fixture_path <- normalizePath(params$fixture_path, winslash="/", mustWork=FALSE)
 if (!file.exists(fixture_path)) {
   stop("Fixture not found: ", fixture_path,
        ". Build once with params$build_fixture = true.")
@@ -1275,6 +1310,45 @@ show_table <- function(z, n=params$show_rows) {
 empty_plot <- function(label) { plot.new(); text(0.5,0.5,label) }
 ```
 
+
+# Computation time and workload
+
+This workflow performs one complete five-year APSIMx run when `build_fixture = true` and performs no APSIMx runs when `build_fixture = false`. Rebuilding the report from an existing fixture is therefore much faster than regenerating the fixture. The measured duration depends on processor, storage, .NET warm-up, and APSIMx DataStore performance; the current workstation measurement is retained instead of assuming a universal duration.
+
+```{r computation-time}
+fixture_model_seconds <- if (
+  !is.null(x$model$elapsed_seconds) &&
+  length(x$model$elapsed_seconds) &&
+  is.finite(as.numeric(x$model$elapsed_seconds[[1L]]))
+) {
+  as.numeric(x$model$elapsed_seconds[[1L]])
+} else {
+  MODEL_RUN_ELAPSED_SECONDS
+}
+
+TOTAL_DOCUMENT_ELAPSED_SECONDS <- as.numeric(
+  difftime(Sys.time(), DOCUMENT_STARTED_AT, units = "secs")
+)
+
+computation_time <- data.frame(
+  mode = if (isTRUE(params$build_fixture)) {
+    "new five-year APSIMx run and fixture build"
+  } else {
+    "report rebuilt from existing fixture"
+  },
+  planned_APSIMx_runs = if (isTRUE(params$build_fixture)) 1L else 0L,
+  measured_model_run_seconds = fixture_model_seconds,
+  measured_model_run_minutes = fixture_model_seconds / 60,
+  measured_document_seconds_so_far = TOTAL_DOCUMENT_ELAPSED_SECONDS,
+  stringsAsFactors = FALSE
+)
+computation_time
+utils::write.csv(
+  computation_time,
+  file.path(LOG_ROOT, "computation_time.csv"),
+  row.names = FALSE
+)
+```
 
 # Fixture status
 
@@ -1698,4 +1772,27 @@ Diagnostics are operational evidence. They explain execution failures and data-e
 
 ```{r diagnostics}
 cat("STDOUT\n",x$diagnostics$stdout,"\n\nSTDERR\n",x$diagnostics$stderr)
+```
+
+
+# Final document elapsed time
+
+The following table records the total elapsed rendering time. When a fixture is reused, this value reflects reporting only; when a fixture is built, it includes model execution, output import, normalisation, tables, and figures.
+
+```{r final-document-time}
+FINAL_DOCUMENT_ELAPSED_SECONDS <- as.numeric(
+  difftime(Sys.time(), DOCUMENT_STARTED_AT, units = "secs")
+)
+final_document_time <- data.frame(
+  build_fixture = isTRUE(params$build_fixture),
+  total_render_seconds = FINAL_DOCUMENT_ELAPSED_SECONDS,
+  total_render_minutes = FINAL_DOCUMENT_ELAPSED_SECONDS / 60,
+  stringsAsFactors = FALSE
+)
+final_document_time
+utils::write.csv(
+  final_document_time,
+  file.path(LOG_ROOT, "document_elapsed_time.csv"),
+  row.names = FALSE
+)
 ```

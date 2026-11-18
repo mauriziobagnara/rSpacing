@@ -1,5 +1,5 @@
 ---
-title: "rSpacing/APSIMx: five-year input uncertainty analysis for environmental outputs, v1.03"
+title: "rSpacing/APSIMx: five-year input uncertainty analysis for environmental outputs, v1.04 workspace edition"
 author: "Maurizio Bagnara"
 date: "`r format(Sys.Date(), '%d %B %Y')`"
 output:
@@ -9,16 +9,21 @@ output:
     number_sections: true
     df_print: paged
 params:
+  workspace_root: ".."
   execute_runs: true
-  samples: 500
+  analysis_profile: "smoke"
+  samples: 30
   seed: 1244
-  bootstrap_replicates: 500
+  bootstrap_replicates: 50
+  output_subdir: "uncertainty_v104_smoke"
+  build_configuration: "Debug"
+  target_framework: "net8.0"
   show_rows: 30
 ---
 
-### Come è preparato il documento
+### How the document is prepared
 
-Questo blocco inizializza l'ambiente di lavoro del report. Imposta il formato comune di tabelle e grafici, controlla che siano disponibili i pacchetti R indispensabili e definisce piccole funzioni di servizio per mostrare risultati e gestire valori mancanti. Non produce risultati scientifici: serve a rendere tutte le sezioni successive riproducibili e coerenti. Il codice è nascosto perché, durante una presentazione, interessa il risultato del controllo e non l'implementazione tecnica.
+This block initialises the reporting environment. It applies consistent formatting to tables and figures, checks the required R packages, and defines small helper functions for displaying results and handling missing values. It does not produce scientific results; it makes all subsequent sections reproducible and consistent. The code is hidden because presentations should focus on the controls and outcomes rather than implementation details.
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(collapse=TRUE,comment="#>",warning=FALSE,message=FALSE,fig.width=10,fig.height=6)
@@ -27,6 +32,7 @@ missing_packages<-required_packages[!vapply(required_packages,requireNamespace,l
 if(length(missing_packages)) stop("Missing R packages: ",paste(missing_packages,collapse=", "))
 has_rsqlite<-requireNamespace("DBI",quietly=TRUE)&&requireNamespace("RSQLite",quietly=TRUE)
 library(ggplot2)
+DOCUMENT_STARTED_AT <- Sys.time()
 show_table<-function(x,n=params$show_rows) if(is.null(x)||!is.data.frame(x)||!nrow(x)) data.frame(note="No data available") else utils::head(x,n)
 scalar_num<-function(x,default=NA_real_) { z<-suppressWarnings(as.numeric(unlist(x,use.names=FALSE))); z<-z[is.finite(z)]; if(length(z)) z[[1L]] else default }
 scalar_chr<-function(x,default="") { z<-as.character(unlist(x,use.names=FALSE)); z<-z[!is.na(z)&nzchar(z)]; if(length(z)) z[[1L]] else default }
@@ -47,35 +53,59 @@ No composite target is calculated.
 
 # Configuration
 
-### Che cosa viene configurato
+### What is configured
 
-Il blocco definisce il collegamento con `Spacing.Tool2`, il periodo 2020-2024, la posizione della simulazione, l'uso del meteo mock e le cartelle dedicate alla v1.03. Verifica inoltre la presenza del progetto, della DLL e di `dotnet`. La directory `_u503` deve essere vuota: in caso contrario l'esecuzione si arresta, così nessun risultato precedente può essere confuso con le nuove 500 simulazioni.
+This block configures the link to `Spacing.Tool2`, the 2020-2024 period, the simulation location, mock weather, and the workspace directories dedicated to v1.04. It also verifies the project, DLL, and `dotnet`. The execution directory under `runs/` must be empty; otherwise execution stops so that previous results cannot be mixed with new simulations.
 
-**Come leggere questa sezione.** I valori qui riportati descrivono il perimetro dell'esperimento, non sono fattori dell'analisi d'incertezza. In particolare, anni, coordinate, cultivar e meteo mock rimangono fissi in tutti gli scenari.
+**How to read this section.** These values define the experiment boundary; they are not uncertainty factors. Years, coordinates, cultivars, and mock weather remain fixed in all scenarios.
 
 ```{r configuration}
-SPACING_ROOT<-"C:/Users/maurizio.bagnara/Documents/spacing-main/apsim"
-BUILD_CONFIGURATION<-"Debug"; TARGET_FRAMEWORK<-"net8.0"; USE_MOCK_WEATHER<-TRUE
+WORKSPACE_ROOT<-normalizePath(params$workspace_root,winslash="/",mustWork=TRUE)
+RSPACING_ROOT<-normalizePath(file.path(WORKSPACE_ROOT,"rSpacing"),winslash="/",mustWork=TRUE)
+SPACING_ROOT<-normalizePath(file.path(WORKSPACE_ROOT,"apsim"),winslash="/",mustWork=TRUE)
+BUILD_CONFIGURATION<-as.character(params$build_configuration)
+TARGET_FRAMEWORK<-as.character(params$target_framework)
+USE_MOCK_WEATHER<-TRUE
 START_YEAR<-2020L; END_YEAR<-2024L; LATITUDE<-44.9000; LONGITUDE<-10.6300; CELL_ID<-"GUA"
 normalize_win<-function(path,must_work=FALSE) normalizePath(path,winslash="/",mustWork=must_work)
-spacing_root<-normalize_win(SPACING_ROOT,TRUE)
+spacing_root<-SPACING_ROOT
 project_path<-file.path(spacing_root,"src","Spacing.Tool2","Spacing.Tool2.csproj")
-dll_path<-file.path(spacing_root,"src","Spacing.Tool2","bin",BUILD_CONFIGURATION,TARGET_FRAMEWORK,"spacing-tool2.dll")
+config_path<-file.path(spacing_root,"spacing.config.json")
+dll_debug<-file.path(spacing_root,"src","Spacing.Tool2","bin","Debug",TARGET_FRAMEWORK,"spacing-tool2.dll")
+dll_release<-file.path(spacing_root,"src","Spacing.Tool2","bin","Release",TARGET_FRAMEWORK,"spacing-tool2.dll")
+dll_candidates<-if(identical(tolower(BUILD_CONFIGURATION),"release")) c(dll_release,dll_debug) else c(dll_debug,dll_release)
+dll_found<-dll_candidates[file.exists(dll_candidates)]
+dll_path<-if(length(dll_found)) normalize_win(dll_found[[1L]],TRUE) else NA_character_
 if(!file.exists(project_path)) stop("Spacing.Tool2 project not found: ",project_path)
-if(!file.exists(dll_path)) stop("Spacing.Tool2 DLL not found: ",dll_path)
+if(!file.exists(config_path)) stop("spacing.config.json not found: ",config_path)
+if(is.na(dll_path)) stop("Spacing.Tool2 DLL not found. Checked: ",paste(dll_candidates,collapse="; "))
 if(!nzchar(Sys.which("dotnet"))) stop("dotnet was not found in the RStudio PATH")
-design_id<-paste0("lhs5y_environmental_inputs_",START_YEAR,"_",END_YEAR,"_n",params$samples,"_s",params$seed,"_v103")
-analysis_root<-file.path(spacing_root,"rSpacing_uncertainty",design_id)
-execution_root<-file.path(spacing_root,"_u503")
-if(dir.exists(execution_root)&&length(list.files(execution_root,all.files=TRUE,no..=TRUE))) stop("Fresh-run requirement failed: execution directory already contains files: ",execution_root)
-dir.create(execution_root,recursive=TRUE,showWarnings=FALSE); dir.create(analysis_root,recursive=TRUE,showWarnings=FALSE)
+profile<-tolower(as.character(params$analysis_profile))
+if(!profile %in% c("smoke","full","custom")) stop("analysis_profile must be smoke, full, or custom")
+if(profile=="smoke" && (as.integer(params$samples)!=30L || as.integer(params$bootstrap_replicates)!=50L)) stop("Smoke profile requires samples = 30 and bootstrap_replicates = 50")
+if(profile=="full" && (as.integer(params$samples)!=500L || as.integer(params$bootstrap_replicates)!=500L)) stop("Full profile requires samples = 500 and bootstrap_replicates = 500")
+if(as.integer(params$samples)<30L) stop("At least 30 samples are required by the completion and PRCC checks")
+output_subdir<-as.character(params$output_subdir)
+if(!nzchar(output_subdir)||grepl("/", output_subdir, fixed=TRUE) || grepl("\\", output_subdir, fixed=TRUE)) stop("output_subdir must be one non-empty directory name")
+design_id<-paste0("lhs5y_environmental_inputs_",START_YEAR,"_",END_YEAR,"_n",params$samples,"_s",params$seed,"_v104")
+analysis_root<-file.path(WORKSPACE_ROOT,"results",output_subdir,design_id)
+execution_root<-file.path(WORKSPACE_ROOT,"runs",paste0("u104_",params$samples,"n"))
+log_root<-file.path(WORKSPACE_ROOT,"logs",output_subdir)
+dir.create(analysis_root,recursive=TRUE,showWarnings=FALSE)
+dir.create(log_root,recursive=TRUE,showWarnings=FALSE)
+if(dir.exists(execution_root)&&length(list.files(execution_root,all.files=TRUE,no..=TRUE))) stop("Fresh-run requirement failed: v1.04 execution directory already contains files: ",execution_root)
+dir.create(execution_root,recursive=TRUE,showWarnings=FALSE)
+runtime_configuration<-data.frame(
+ field=c("analysis_profile","samples","bootstrap_replicates","workspace_root","rspacing_root","spacing_root","project_path","config_path","tool2_dll","execution_root","analysis_root","log_root"),
+ value=c(profile,params$samples,params$bootstrap_replicates,WORKSPACE_ROOT,RSPACING_ROOT,SPACING_ROOT,project_path,config_path,dll_path,execution_root,analysis_root,log_root),stringsAsFactors=FALSE)
+write.csv(runtime_configuration,file.path(log_root,"runtime_configuration.csv"),row.names=FALSE)
 ```
 
 # Five-year baseline scenario
 
-### Che cosa costruisce la baseline quinquennale
+### What the five-year baseline builds
 
-Questo blocco ricrea la stessa rotazione usata nella Morris stabile: frumento `Hartog`, mais `B_110` e soia `Generic_MG1`, con sei strati di suolo e le pratiche gestionali già funzionanti. La baseline è il punto centrale attorno al quale vengono applicate le perturbazioni LHS. Il codice è nascosto, mentre la tabella successiva rende visibili i valori rilevanti.
+This block recreates the same rotation used by the stable Morris workflow: Wheat `Hartog`, Maize `B_110`, and Soybean `Generic_MG1`, with six soil layers and the validated management practices. The baseline is the central scenario around which LHS perturbations are applied. The implementation is hidden, while the next table exposes the relevant values.
 
 ```{r scenario, include=FALSE}
 soil_profile<-list(ProfileId="S1",CellId=CELL_ID,SoilType="Demonstration silt loam",DataSource="Synthetic demo profile; not observed soil data",AreaFraction=1,
@@ -92,11 +122,11 @@ base_crops<-list(
  list(name="Soybean",management=list(cultivar="Generic_MG1",tillage_type="no-till",nitrogen_mineral_kg_ha=0,nitrogen_organic_kg_ha=0,sowing_window_start="1-may",sowing_window_end="15-jun",sowing_density=35,sowing_depth=35,row_spacing=450,auto_irrigate=TRUE,irrigation_threshold=.45,irrigation_target=.80,max_irrigation_mm=30,irrigation_window_start="15-jun",irrigation_window_end="31-aug")))
 ```
 
-### Come leggere il profilo e la gestione di riferimento
+### How to read the reference soil profile and management
 
-La prima tabella descrive ciascuno strato: `OC` è il carbonio organico iniziale, `BD` la densità apparente, `LL15`, `DUL` e `SAT` i limiti idrici, `SW` l'acqua iniziale, `NO3` e `NH4` le forme minerali dell'azoto e `PH` la reazione del suolo. La seconda tabella riassume cultivar, apporti azotati e presenza dell'irrigazione automatica.
+The first table describes each soil layer: `OC` is initial organic carbon, `BD` is bulk density, `LL15`, `DUL`, and `SAT` are water limits, `SW` is initial water, `NO3` and `NH4` are mineral nitrogen forms, and `PH` describes soil reaction. The second table summarises cultivars, nitrogen inputs, and automatic irrigation.
 
-Questi valori non sono risultati. Sono la configurazione nominale da cui il disegno genera scenari più bassi o più alti. Nella presentazione conviene sottolineare che l'incertezza è condizionata a questa baseline sintetica e non rappresenta ancora l'errore misurato di un sito reale.
+These values are not results. They are the nominal configuration from which the design generates lower and higher scenarios. The uncertainty is conditional on this synthetic baseline and does not represent measured error at a real site.
 
 ```{r scenario-summary}
 scenario_layers <- do.call(rbind,lapply(soil_profile$Layers,function(z) data.frame(depth=paste0(z$DepthTop,"-",z$DepthBottom," cm"),OC=z$OC,BD=z$BD,LL15=z$LL15,DUL=z$DUL,SAT=z$SAT,SW=z$SW,NO3=z$NO3,NH4=z$NH4,PH=z$PH)))
@@ -109,11 +139,11 @@ show_table(scenario_crops,20)
 
 All ranges are relative to the quinquennial baseline. The first version uses bounded uniform distributions because no site-specific measurement-error distributions were supplied. Soil hydraulic constraints are reconstructed, not checked only after sampling.
 
-### Che cosa rappresenta il catalogo degli input
+### What the input catalogue represents
 
-Ogni riga è un fattore incerto. `lower` e `upper` sono gli estremi ammessi; per i moltiplicatori, 1 indica la baseline, mentre per gli spostamenti, come `ph_shift`, 0 indica nessuna modifica. La colonna `group` distingue suolo e gestione. Nella v1.03 tutti i fattori seguono una distribuzione uniforme limitata, perché non sono state fornite distribuzioni sperimentali specifiche.
+Each row is one uncertain factor. `lower` and `upper` are the permitted bounds; for multipliers, 1 represents the baseline, while for shifts such as `ph_shift`, 0 represents no change. `group` distinguishes soil from management. In v1.04, all factors use bounded uniform distributions because no site-specific empirical distributions were supplied.
 
-**Come leggere la tabella.** Un intervallo 0,70-1,30 significa una variazione dal -30% al +30%. Un intervallo -0,5-0,5 per il pH significa invece sottrarre o aggiungere fino a mezzo punto. Gli intervalli descrivono l'incertezza assunta, non la sensibilità del modello e non l'importanza finale del fattore.
+**How to read the table.** A range of 0.70-1.30 means a change from -30% to +30%. A pH range of -0.5 to 0.5 means subtracting or adding up to half a pH unit. The bounds describe assumed uncertainty, not model sensitivity or final factor importance.
 
 ```{r input-catalogue}
 input_spec<-data.frame(
@@ -127,11 +157,11 @@ show_table(input_spec,100)
 
 # Constrained Latin hypercube
 
-### Come vengono generati scenari fisicamente coerenti
+### How physically consistent scenarios are generated
 
-Queste funzioni trasformano i numeri LHS in profili e pratiche gestionali utilizzabili da APSIMx. La trasformazione conserva l'ordine fisico `LL15 < DUL < SAT`, mantiene l'acqua iniziale tra `LL15` e `DUL`, impedisce valori negativi di carbonio e azoto e limita il pH. Per l'irrigazione, il target viene mantenuto superiore alla soglia.
+These functions transform LHS values into soil profiles and management practices that APSIMx can use. The transformation preserves `LL15 < DUL < SAT`, keeps initial water between `LL15` and `DUL`, prevents negative carbon and nitrogen values, and bounds pH. For irrigation, the target is kept above the threshold.
 
-Il codice è nascosto perché la parte da comunicare è il principio: il campionamento esplora l'incertezza senza creare profili impossibili. Se uno scenario non supera questi controlli, non viene inviato ad APSIMx.
+The code is hidden because the key point is the principle: sampling explores uncertainty without creating impossible profiles. A scenario that fails these checks is not sent to APSIMx.
 
 ```{r lhs-functions, include=FALSE}
 random_lhs<-function(n,k,seed) { set.seed(seed); out<-matrix(NA_real_,n,k); for(j in seq_len(k)) out[,j]<-(sample.int(n)-runif(n))/n; out }
@@ -172,20 +202,20 @@ validate_scenario<-function(z) {
 }
 ```
 
-### Come viene costruito il Latin Hypercube
+### How the Latin Hypercube is built
 
-Il blocco crea 500 combinazioni stratificate degli input usando il seed 1244. Ogni fattore attraversa l'intero intervallo definito, con un valore in ciascuna fascia equiprobabile. Il disegno completo viene salvato in `input_uncertainty_design.csv` prima dell'avvio delle simulazioni.
+The block creates the number of stratified input combinations specified by `params$samples`, using seed 1244. Each factor spans its full defined range, with one value in each equiprobable stratum. The complete design is saved to `input_uncertainty_design.csv` before simulations begin.
 
 ```{r lhs-design, include=FALSE}
 U<-random_lhs(as.integer(params$samples),nrow(input_spec),as.integer(params$seed)); uncertainty_design<-scale_lhs(U,input_spec); uncertainty_design$sample_id<-seq_len(nrow(uncertainty_design))
 write.csv(uncertainty_design,file.path(analysis_root,"input_uncertainty_design.csv"),row.names=FALSE)
 ```
 
-### Come leggere il riepilogo LHS
+### How to read the LHS summary
 
-La tabella permette di controllare il disegno prima di interpretare APSIMx. `samples` è il numero di scenari, `factors` il numero di input e `seed` rende il campionamento riproducibile. `expected_min` ed `expected_max` sono gli estremi effettivamente raggiunti dai 500 campioni. Devono essere vicini, ma non necessariamente identici, ai limiti teorici del catalogo.
+The table checks the design before APSIMx results are interpreted. `samples` is the scenario count, `factors` is the input count, and `seed` makes sampling reproducible. `expected_min` and `expected_max` are the extrema actually reached by the sampled design. They should be close, but not necessarily identical, to the theoretical catalogue bounds.
 
-Se un estremo appare molto più ristretto del previsto, il problema riguarda il disegno; se invece il disegno copre correttamente l'intervallo ma gli output cambiano poco, il modello è poco sensibile a quell'input nel dominio studiato.
+If an observed extreme is much narrower than expected, the issue concerns the design. If the design covers the range correctly but outputs change little, the model is relatively insensitive to that input within the studied domain.
 
 ```{r lhs-design-summary}
 design_summary <- data.frame(samples=nrow(uncertainty_design),factors=nrow(input_spec),seed=as.integer(params$seed),expected_min=vapply(input_spec$factor,function(nm)min(uncertainty_design[[nm]]),numeric(1)),expected_max=vapply(input_spec$factor,function(nm)max(uncertainty_design[[nm]]),numeric(1)),row.names=input_spec$factor)
@@ -194,11 +224,11 @@ show_table(design_summary,100)
 
 # Output extraction
 
-### Quali risultati ambientali vengono estratti
+The table explicitly defines each variable, unit, and temporal operation. Soil carbon is a **final stock**, so the last valid value on the final date is used. N2O-N, CO2-C, and nitrate leaching are **flows**, so daily values are summed over the rotation. The `daily` table is the primary source and `sqlite__DailyReport` is the fallback.
 
-La tabella definisce in modo esplicito variabile, unità e operazione temporale. Il carbonio del suolo è uno **stock finale**, quindi si usa l'ultimo valore valido alla data conclusiva. N2O-N, CO2-C e nitrato lisciviato sono **flussi**, quindi si sommano tutti i valori giornalieri della rotazione. La tabella `daily` è la sorgente primaria; `sqlite__DailyReport` è il fallback.
+**How to read the units.** `N2O_total_kgNha` is kg of N contained in N2O per hectare, not kg of N2O and not CO2 equivalent. `CO2C_total_kgCha` is kg of C contained in CO2. `LeachNO3_kgNha` is nitrate-N leaving the simulated profile, not a direct groundwater-concentration measurement.
 
-**Come leggere le unità.** `N2O_total_kgNha` è espresso come kg di N contenuto in N2O per ettaro, non come kg di N2O e non come CO2 equivalente. `CO2C_total_kgCha` è kg di C contenuto nella CO2. `LeachNO3_kgNha` è N nitrico che lascia il profilo simulato, non una misura diretta della concentrazione in falda.
+**How to read the units.** `N2O_total_kgNha` is kg of N contained in N2O per hectare, not kg of N2O and not CO2 equivalent. `CO2C_total_kgCha` is kg of C contained in CO2. `LeachNO3_kgNha` is nitrate-N leaving the simulated profile, not a direct groundwater-concentration measurement.
 
 ```{r environmental-output-contract}
 environmental_output_contract <- data.frame(
@@ -210,9 +240,9 @@ environmental_output_contract <- data.frame(
 show_table(environmental_output_contract,20)
 ```
 
-### Come vengono controllati ed estratti gli output
+The block reads CSV and SQLite DataStore outputs from APSIMx, identifies the daily table, converts the four columns to numeric values, and locates the final date. A run is considered available only when at least one complete finite row exists. This prevents a real zero from being treated as missing.
 
-Il blocco legge CSV e DataStore SQLite prodotti da APSIMx, riconosce la tabella giornaliera, converte in numerico le quattro colonne e individua la data finale. La run è dichiarata disponibile solo se esiste almeno una riga completa e finita. Questa separazione evita di trattare uno zero reale come un valore mancante.
+The block reads CSV and SQLite DataStore outputs from APSIMx, identifies the daily table, converts the four columns to numeric values, and locates the final date. A run is considered available only when at least one complete finite row exists. This prevents a real zero from being treated as missing.
 
 ```{r output-functions, include=FALSE}
 read_csv_if_present<-function(path) { if(is.null(path)||!length(path)||is.na(path)||!nzchar(path)||!file.exists(path)) return(NULL); utils::read.csv(path,stringsAsFactors=FALSE,check.names=FALSE) }
@@ -236,22 +266,41 @@ extract_environmental_outputs<-function(tables) {
 }
 ```
 
+# Computation time and workload
+
+The planned APSIMx workload is `1 + 16 + samples`: one baseline, 16 one-at-a-time preflight runs, and the LHS ensemble. Bootstrap replicates do not launch APSIMx. Before model execution, a reliable clock-time estimate is not assumed because duration depends on processor, storage, .NET warm-up, and DataStore performance. After execution, the report calculates measured run time and an empirical projection based on the observed mean seconds per run. The smoke profile is diagnostic only; the full profile is the basis for scientific interpretation.
+
+```{r planned-computation-time}
+planned_APSIMx_runs <- 1L + nrow(input_spec) + nrow(uncertainty_design)
+planned_workload <- data.frame(
+The table shows the planned number of executions and their output locations. Execution is sequential and reuse is disabled. With 16 inputs, the smoke profile plans 47 runs (1 baseline, 16 preflight, and 30 scenarios), while the full profile plans 517 runs (1 + 16 + 500).
+  baseline_runs = 1L,
+For presentation, this table documents computational cost and makes clear that all four outputs are obtained from the same run, not from four separate experiments.
+  lhs_runs = nrow(uncertainty_design),
+  planned_APSIMx_runs = planned_APSIMx_runs,
+  bootstrap_replicates = as.integer(params$bootstrap_replicates),
+  note = "Bootstrap replicates do not add APSIMx runs",
+  stringsAsFactors = FALSE
+)
+show_table(planned_workload, 20)
+```
+
 # APSIMx runner
 
-### Piano di esecuzione
+### Execution plan
 
-La tabella mostra quante esecuzioni sono previste e dove vengono scritte. La modalità è sequenziale e il riuso è disabilitato. Con 16 input e 500 campioni il massimo previsto è 517 run: una baseline, 16 preflight e 500 scenari LHS.
+The table shows the planned number of executions and their output locations. Execution is sequential and reuse is disabled. With 16 inputs, the smoke profile plans 47 runs (1 baseline, 16 preflight, and 30 scenarios), while the full profile plans 517 runs (1 + 16 + 500).
 
-Durante la presentazione, questa tabella documenta il costo computazionale effettivo e rende evidente che i quattro output sono ricavati dalla stessa run, non da quattro esperimenti separati.
+For presentation, this table documents computational cost and makes clear that all four outputs are obtained from the same run, not from four separate experiments.
 
 ```{r runner-settings}
-runner_plan <- data.frame(item=c("Execution mode","Previous-run reuse","Baseline runs","Input preflight runs","LHS ensemble runs","Maximum planned APSIMx runs","Execution root","Analysis root"),value=c("Sequential fresh runs","Disabled",1L,nrow(input_spec),nrow(uncertainty_design),1L+nrow(input_spec)+nrow(uncertainty_design),execution_root,analysis_root),stringsAsFactors=FALSE)
+runner_plan <- data.frame(item=c("Analysis profile","Samples","Bootstrap replicates","Execution mode","Previous-run reuse","Baseline runs","Input preflight runs","LHS ensemble runs","Maximum planned APSIMx runs","Execution root","Analysis root","Log root"),value=c(profile,params$samples,params$bootstrap_replicates,"Sequential fresh runs","Disabled",1L,nrow(input_spec),nrow(uncertainty_design),1L+nrow(input_spec)+nrow(uncertainty_design),execution_root,analysis_root,log_root),stringsAsFactors=FALSE)
 show_table(runner_plan,30)
 ```
 
-### Che cosa fa il runner APSIMx
+### What the APSIMx runner does
 
-Per ogni scenario il runner crea una cartella indipendente, scrive request e configurazione JSON, avvia `Spacing.Tool2` tramite `dotnet` e legge il risultato. Conserva exit status, log, durata ed eventuale motivo di fallimento. Il codice è nascosto, ma questi metadati rimangono disponibili nelle tabelle diagnostiche.
+For each scenario, the runner creates an independent directory, writes request and configuration JSON files, starts `Spacing.Tool2` through `dotnet`, and reads the result. It retains exit status, logs, duration, and any failure reason. The code is hidden, but these metadata remain available in the diagnostic tables.
 
 ```{r runner, include=FALSE}
 run_uncertainty<-function(run_index,scenario,run_kind="sample") {
@@ -264,7 +313,7 @@ run_uncertainty<-function(run_index,scenario,run_kind="sample") {
  args<-c(shQuote(normalize_win(dll_path,TRUE)),"--config",shQuote(normalize_win(config_path,TRUE)),"--request",shQuote(normalize_win(request_path,TRUE)),"--result",shQuote(normalize_win(result_path,FALSE)),"--manifest",shQuote(normalize_win(manifest_path,FALSE))); if(USE_MOCK_WEATHER) args<-c(args,"--mock")
  started<-Sys.time(); exit_status<-system2("dotnet",args=args,stdout=stdout_path,stderr=stderr_path,wait=TRUE); elapsed<-as.numeric(difftime(Sys.time(),started,units="secs")); stderr_text<-if(file.exists(stderr_path)) paste(readLines(stderr_path,warn=FALSE),collapse="\\n") else ""
  result<-if(identical(as.integer(exit_status),0L)&&file.exists(result_path)) tryCatch(jsonlite::read_json(result_path,simplifyVector=TRUE),error=function(e)NULL) else NULL
- model_success<-!is.null(result)&&isTRUE(result$success)
+For each scenario, the runner creates an independent directory, writes request and configuration JSON files, starts `Spacing.Tool2` through `dotnet`, and reads the result. It retains exit status, logs, duration, and any failure reason. The code is hidden, but these metadata remain available in the diagnostic tables.
  if(!model_success) return(list(model_success=FALSE,outputs_available=FALSE,reason=if(nzchar(stderr_text)) stderr_text else paste("Spacing.Tool2 exit code",exit_status),exit_status=as.integer(exit_status),stderr_path=stderr_path,elapsed_seconds=elapsed))
  env<-extract_environmental_outputs(read_all_tables(result)); c(list(model_success=TRUE,outputs_available=isTRUE(env$available),exit_status=as.integer(exit_status),stderr_path=stderr_path,elapsed_seconds=elapsed),env)
 }
@@ -272,15 +321,15 @@ run_uncertainty<-function(run_index,scenario,run_kind="sample") {
 
 # Baseline and input preflight
 
-### Perché baseline e preflight precedono l'ensemble
+### Why baseline and preflight precede the ensemble
 
-La baseline verifica che la rotazione quinquennale produca tutti e quattro gli output. Il preflight modifica poi un input alla volta e controlla sia la validità fisica dello scenario sia la conclusione di APSIMx. Le 500 run LHS iniziano solo se tutti i 16 input superano il test. Questo evita di scoprire dopo molte ore che una variabile non viene trasferita correttamente.
+The baseline verifies that the five-year rotation produces all four outputs. Preflight then changes one input at a time and checks both physical validity and APSIMx completion. LHS runs begin only after all 16 inputs pass. This avoids discovering after many hours that an input was not transferred correctly.
 
 ```{r baseline-preflight, include=FALSE, eval=params$execute_runs}
 baseline_scenario<-list(soil_profile=soil_profile,crops=base_crops); baseline<-run_uncertainty(0L,baseline_scenario,"baseline")
 baseline_row<-data.frame(model_success=baseline$model_success,outputs_available=baseline$outputs_available,soil_c_final=scalar_num(baseline$soil_c_final),n2o_cumulative=scalar_num(baseline$n2o_cumulative),co2c_cumulative=scalar_num(baseline$co2c_cumulative),leach_no3_cumulative=scalar_num(baseline$leach_no3_cumulative),final_date=scalar_chr(baseline$final_date),reason=scalar_chr(baseline$reason),stringsAsFactors=FALSE)
 write.csv(baseline_row,file.path(analysis_root,"baseline_environmental_outputs.csv"),row.names=FALSE)
-if(!isTRUE(baseline$model_success)||!isTRUE(baseline$outputs_available)) stop("Environmental baseline gate failed: ",scalar_chr(baseline$reason,"outputs unavailable"))
+The baseline verifies that the five-year rotation produces all four outputs. Preflight then changes one input at a time and checks both physical validity and APSIMx completion. LHS runs begin only after all 16 inputs pass. This avoids discovering after many hours that an input was not transferred correctly.
 preflight<-vector("list",nrow(input_spec))
 for(i in seq_len(nrow(input_spec))) { x<-as.list(stats::setNames(rep(1,nrow(input_spec)),input_spec$factor)); x$oc_gradient<-0; x$ph_shift<-0; x$irrigation_threshold_shift<-0; x$irrigation_target_shift<-0; x[[input_spec$factor[i]]]<-input_spec$lower[i]+.75*(input_spec$upper[i]-input_spec$lower[i]); z<-perturb_scenario(x); ck<-validate_scenario(z); rr<-if(ck$ok) run_uncertainty(i,z,"preflight") else list(model_success=FALSE,outputs_available=FALSE,reason=ck$reason,exit_status=NA_integer_,stderr_path="",elapsed_seconds=0); accepted<-ck$ok&&isTRUE(rr$model_success)&&isTRUE(rr$outputs_available); preflight[[i]]<-data.frame(factor=input_spec$factor[i],group=input_spec$group[i],tested_value=x[[input_spec$factor[i]]],scenario_valid=ck$ok,model_success=isTRUE(rr$model_success),outputs_available=isTRUE(rr$outputs_available),accepted=accepted,reason=if(accepted) "" else scalar_chr(rr$reason,ck$reason),exit_status=scalar_num(rr$exit_status),stderr_path=scalar_chr(rr$stderr_path),elapsed_seconds=scalar_num(rr$elapsed_seconds),stringsAsFactors=FALSE) }
 preflight_audit<-do.call(rbind,preflight); write.csv(preflight_audit,file.path(analysis_root,"input_preflight_audit.csv"),row.names=FALSE)
@@ -289,29 +338,29 @@ if(!all(preflight_audit$accepted)) stop("Input preflight rejected one or more fa
 
 ## Baseline environmental outputs
 
-### Come leggere la baseline ambientale
+### How to read the environmental baseline
 
-La riga rappresenta il riferimento non perturbato. `soil_c_final` è lo stock all'ultima data; gli altri tre valori sono cumuli quinquennali. `model_success` e `outputs_available` devono essere `TRUE`; `reason` deve essere vuoto. La baseline serve come controllo e contesto, ma l'importanza degli input viene calcolata sull'intero ensemble, non come semplice differenza dalla baseline.
+The row is the unperturbed reference. `soil_c_final` is the stock on the final date; the other three values are five-year cumulative flows. `model_success` and `outputs_available` must be `TRUE`, and `reason` must be empty. The baseline provides context and validation, but input importance is calculated from the full ensemble rather than simple differences from baseline.
 
 ```{r baseline-results}
 show_table(baseline_row,20)
 ```
-
+The row is the unperturbed reference. `soil_c_final` is the stock on the final date; the other three values are five-year cumulative flows. `model_success` and `outputs_available` must be `TRUE`, and `reason` must be empty. The baseline provides context and validation, but input importance is calculated from the full ensemble rather than simple differences from baseline.
 ## Input preflight audit
 
-### Come leggere l'audit degli input
+### How to read the input audit
 
-Ogni riga corrisponde a un fattore testato isolatamente. `scenario_valid` controlla i vincoli, `model_success` l'esecuzione APSIMx, `outputs_available` l'estrazione dei quattro risultati e `accepted` la decisione finale. Tutte le righe devono essere accettate. In caso contrario, `reason`, `exit_status` e `stderr_path` indicano dove intervenire.
+Each row is one factor tested in isolation. `scenario_valid` checks constraints, `model_success` checks APSIMx execution, `outputs_available` checks extraction of all four outputs, and `accepted` is the final decision. All rows must be accepted. Otherwise, `reason`, `exit_status`, and `stderr_path` indicate where to investigate.
 
 ```{r preflight-results}
-show_table(preflight_audit,100)
+Each row is one factor tested in isolation. `scenario_valid` checks constraints, `model_success` checks APSIMx execution, `outputs_available` checks extraction of all four outputs, and `accepted` is the final decision. All rows must be accepted. Otherwise, `reason`, `exit_status`, and `stderr_path` indicate where to investigate.
 ```
 
 # Execute uncertainty ensemble
 
-### Che cosa accade nelle 500 simulazioni
+### What happens during the LHS simulations
 
-Per ogni riga del LHS il blocco ricostruisce suolo e gestione, valida il profilo, esegue APSIMx e registra i quattro output. Salva `uncertainty_runs.csv`, l'audit dei profili e un file separato per le run fallite. L'analisi statistica prosegue soltanto se almeno l'80% degli scenari, e comunque almeno 30, è completo.
+For each LHS row, the block reconstructs soil and management, validates the profile, runs APSIMx, and records the four outputs. It saves `uncertainty_runs.csv`, the profile audit, and a separate file for failed runs. In the smoke profile, at least 20 complete runs are required; the full profile is intended for substantially higher completion and must be evaluated with the completion audit.
 
 ```{r execute-ensemble, include=FALSE, eval=params$execute_runs}
 run_rows<-vector("list",nrow(uncertainty_design)); profile_audit<-vector("list",nrow(uncertainty_design))
@@ -324,13 +373,13 @@ for(i in seq_len(nrow(uncertainty_design))) {
 uncertainty_runs<-do.call(rbind,run_rows); profiles<-do.call(rbind,profile_audit); results<-merge(uncertainty_design,uncertainty_runs,by="sample_id",sort=FALSE)
 write.csv(profiles,file.path(analysis_root,"input_profiles_audit.csv"),row.names=FALSE); write.csv(results,file.path(analysis_root,"uncertainty_runs.csv"),row.names=FALSE); write.csv(results[!results$model_success|!results$outputs_available,,drop=FALSE],file.path(analysis_root,"failed_uncertainty_runs.csv"),row.names=FALSE)
 complete<-results$model_success&results$outputs_available&is.finite(results$soil_c_final_kgCha)&is.finite(results$n2o_cumulative_kgNha)&is.finite(results$co2c_cumulative_kgCha)&is.finite(results$leach_no3_cumulative_kgNha)
-if(sum(complete)<max(30,ceiling(.8*nrow(results)))) stop("Too few complete uncertainty runs: ",sum(complete),"/",nrow(results),". See failed_uncertainty_runs.csv")
+if(sum(complete)<20L) stop("Too few complete uncertainty runs: ",sum(complete),"/",nrow(results),". See failed_uncertainty_runs.csv")
 analysis_data<-results[complete,,drop=FALSE]
 ```
 
 ## Ensemble execution results
 
-### Come leggere lo stato dell'ensemble
+### How to read ensemble status
 
 `requested` è il numero pianificato; `model_success` conta le run concluse dal modello; `outputs_available` quelle con le quattro variabili leggibili; `complete` quelle utilizzabili nell'analisi; `failed` è la differenza. Durata media e ore totali aiutano a documentare il costo computazionale. Idealmente `requested`, `model_success`, `outputs_available` e `complete` coincidono.
 
@@ -339,11 +388,39 @@ ensemble_status <- data.frame(requested=nrow(results),model_success=sum(results$
 show_table(ensemble_status,20)
 ```
 
+### Measured and projected computation time
+
+The table below uses the elapsed seconds recorded by the runner. `measured_APSIMx_hours` includes the baseline, preflight, and LHS executions available in this document. `projected_full_517_hours` estimates a 517-run full analysis from the observed mean run duration on the current workstation; it is an empirical planning value, not a guarantee.
+
+```{r measured-computation-time}
+all_elapsed_seconds <- c(
+  scalar_num(baseline$elapsed_seconds, NA_real_),
+  preflight_audit$elapsed_seconds,
+  uncertainty_runs$elapsed_seconds
+)
+all_elapsed_seconds <- all_elapsed_seconds[is.finite(all_elapsed_seconds)]
+observed_run_count <- length(all_elapsed_seconds)
+mean_seconds_per_run <- if (observed_run_count) mean(all_elapsed_seconds) else NA_real_
+measured_APSIMx_hours <- if (observed_run_count) sum(all_elapsed_seconds) / 3600 else NA_real_
+projected_full_517_hours <- if (is.finite(mean_seconds_per_run)) 517 * mean_seconds_per_run / 3600 else NA_real_
+time_estimate <- data.frame(
+  analysis_profile = profile,
+  observed_APSIMx_runs = observed_run_count,
+  mean_seconds_per_run = mean_seconds_per_run,
+  measured_APSIMx_hours = measured_APSIMx_hours,
+  projected_full_517_hours = projected_full_517_hours,
+  bootstrap_replicates = as.integer(params$bootstrap_replicates),
+  stringsAsFactors = FALSE
+)
+show_table(time_estimate, 20)
+write.csv(time_estimate,file.path(analysis_root,"computation_time_estimate.csv"),row.names=FALSE)
+```
+
 ## Incomplete or failed scenarios
 
-### Come leggere le run problematiche
+### How to read problematic runs
 
-Questa tabella mostra solo scenari incompleti o falliti. Se è vuota, tutte le run sono utilizzabili. Altrimenti `reason` distingue errori del modello da output mancanti, `exit_status` riporta il codice di uscita e `stderr_path` porta al log specifico. Non si devono interpretare distribuzioni o ranking senza prima valutare se i fallimenti siano casuali o concentrati in una parte del dominio.
+This table shows only incomplete or failed scenarios. If empty, all runs are usable. Otherwise, `reason` distinguishes model errors from missing outputs, `exit_status` records the exit code, and `stderr_path` points to the relevant log. Distributions and rankings should not be interpreted before determining whether failures are random or concentrated in part of the domain.
 
 ```{r ensemble-failures}
 failed_preview <- results[!complete,c("sample_id","model_success","outputs_available","reason","exit_status","stderr_path","elapsed_seconds"),drop=FALSE]
@@ -352,9 +429,9 @@ show_table(failed_preview,params$show_rows)
 
 ## Extracted environmental responses
 
-### Come leggere l'anteprima degli output
+### How to read the output preview
 
-Ogni riga è uno scenario LHS completo. Le quattro colonne ambientali sono già nella forma usata dall'analisi: stock finale per il Soil C e cumuli quinquennali per i tre flussi. `final_date` deve coincidere con la fine della rotazione e `source_table` documenta la tabella realmente utilizzata. L'anteprima serve a individuare rapidamente valori costanti, scale inattese o duplicazioni.
+Each row is a complete LHS scenario. The four environmental columns are already in analysis form: final stock for Soil C and five-year cumulative values for the three flows. `final_date` should match the rotation end and `source_table` records the table actually used. The preview helps identify constant values, unexpected scales, or duplication.
 
 ```{r ensemble-response-preview}
 response_preview <- analysis_data[,c("sample_id","soil_c_final_kgCha","n2o_cumulative_kgNha","co2c_cumulative_kgCha","leach_no3_cumulative_kgNha","final_date","source_table"),drop=FALSE]
@@ -363,9 +440,9 @@ show_table(response_preview,params$show_rows)
 
 # Uncertainty summaries and rankings
 
-### Come vengono stimati incertezza e importanza
+### How uncertainty and importance are estimated
 
-Le funzioni calcolano statistiche descrittive, PRCC e coefficienti di regressione standardizzati. Il PRCC usa i ranghi e misura l'associazione monotona tra un input e un output dopo aver controllato gli altri input. Il bootstrap ripete il calcolo su campioni ricampionati per costruire l'intervallo di confidenza al 95%.
+The functions calculate descriptive statistics, PRCC, and standardised regression coefficients. PRCC uses ranks and measures the monotonic association between one input and one output after controlling for the other inputs. Bootstrap resampling is used to build the 95% interval.
 
 ```{r analysis-functions, include=FALSE}
 output_names<-c("soil_c_final_kgCha","n2o_cumulative_kgNha","co2c_cumulative_kgCha","leach_no3_cumulative_kgNha")
@@ -379,9 +456,9 @@ src_one<-function(X,y) { Z<-as.data.frame(scale(X)); fit<-lm(as.numeric(scale(y)
 bootstrap_prcc<-function(X,y,B,seed) { set.seed(seed); ans<-matrix(NA_real_,B,ncol(X)); for(b in seq_len(B)) { ii<-sample.int(nrow(X),replace=TRUE); ans[b,]<-tryCatch(prcc_one(X[ii,,drop=FALSE],y[ii]),error=function(e)rep(NA_real_,ncol(X))) }; ans }
 ```
 
-### Come vengono prodotti i quattro ranking
+### How the four rankings are produced
 
-Il blocco analizza separatamente Soil C finale, N2O-N, CO2-C e nitrato lisciviato. Per ciascun output calcola PRCC, intervallo bootstrap, coefficiente standardizzato e rango basato sul valore assoluto del PRCC. Un PRCC positivo indica che l'output tende ad aumentare al crescere dell'input; uno negativo indica una diminuzione. Il valore assoluto descrive la forza, mentre il segno descrive la direzione.
+The block analyses final Soil C, N2O-N, CO2-C, and nitrate leaching separately. For each output it calculates PRCC, bootstrap interval, standardised coefficient, and a rank based on absolute PRCC. A positive PRCC indicates that output tends to increase with the input; a negative PRCC indicates a decrease. Absolute value describes strength, while sign describes direction.
 
 ```{r calculate-rankings, include=FALSE}
 X<-as.matrix(analysis_data[,input_spec$factor,drop=FALSE]); summaries<-do.call(rbind,lapply(output_names,function(nm) summary_one(analysis_data[[nm]],nm)))
@@ -394,17 +471,17 @@ for(nm in output_names) write.csv(rankings[[nm]],file.path(analysis_root,paste0(
 
 ## Environmental output distributions
 
-### Come leggere l'incertezza degli output
+### How to read output uncertainty
 
-Per ogni risposta sono riportati numero di run, media, deviazione standard, coefficiente di variazione e percentili. L'intervallo `p05-p95` contiene il 90% centrale degli scenari e rappresenta meglio l'incertezza rispetto al solo minimo-massimo, che può essere guidato da pochi casi estremi. Il coefficiente di variazione facilita il confronto relativo tra output con unità e scale diverse, ma va interpretato con cautela se la media è vicina a zero.
+For each response, the table reports run count, mean, standard deviation, coefficient of variation, and percentiles. `p05-p95` contains the central 90% of scenarios and is generally more informative than the minimum-maximum range, which can be driven by a few extreme cases. The coefficient of variation supports relative comparison across outputs but must be interpreted cautiously when the mean is near zero.
 
 ```{r output-summary}
 show_table(summaries,100)
 ```
 
-### Come leggere gli istogrammi
+### How to read the histograms
 
-Ogni pannello usa la propria scala orizzontale. L'altezza delle barre indica quanti scenari ricadono in ciascun intervallo, non una probabilità assoluta e non una serie temporale. Distribuzioni strette indicano poca propagazione dell'incertezza degli input; code lunghe, asimmetrie o più picchi indicano risposte non lineari, soglie o combinazioni di input differenti. Le ampiezze tra pannelli non vanno confrontate direttamente senza considerare unità e scala.
+Each panel uses its own horizontal scale. Bar height is the number of scenarios in each bin, not an absolute probability and not a time series. Narrow distributions indicate limited propagation of input uncertainty; long tails, asymmetry, or multiple peaks suggest nonlinear responses, thresholds, or different input combinations. Panel widths should not be compared without considering units and scales.
 
 ```{r distribution-plots, fig.height=8}
 long<-do.call(rbind,lapply(output_names,function(nm)data.frame(output=nm,value=analysis_data[[nm]])))
@@ -413,17 +490,17 @@ ggplot(long,aes(value))+geom_histogram(bins=30,fill="#2E75B6",colour="white")+fa
 
 ## Input importance by environmental output
 
-### Come leggere la tabella d'importanza
+### How to read the importance table
 
-Le righe sono ordinate all'interno di ciascun output. `prcc` esprime direzione e intensità dell'associazione, `prcc_low` e `prcc_high` il 95% bootstrap, `standardized_regression` fornisce un controllo parametrico e `importance_rank` ordina per `|PRCC|`. Un fattore è più convincente quando PRCC e regressione hanno segno simile e l'intervallo del PRCC non attraversa zero. Il ranking non dimostra causalità fuori dal dominio campionato.
+Rows are ordered within each output. `prcc` describes direction and strength, `prcc_low` and `prcc_high` give the 95% bootstrap interval, `standardized_regression` provides a parametric cross-check, and `importance_rank` orders by `|PRCC|`. Evidence for a factor is stronger when PRCC and regression have the same sign and the PRCC interval does not cross zero. The ranking does not establish causality outside the sampled domain.
 
 ```{r importance-table}
 show_table(importance[order(importance$output,importance$importance_rank),],200)
 ```
 
-### Come leggere i grafici PRCC
+### How to read the PRCC plots
 
-Ogni punto è il PRCC di un input e la barra verticale è il suo intervallo bootstrap al 95%. La linea a zero separa effetti positivi e negativi. Punti lontani da zero con intervalli stretti indicano fattori dominanti e stabili; intervalli che attraversano zero segnalano effetti deboli o non risolti con 500 scenari. I pannelli hanno scale degli input indipendenti sull'asse verticale, ma la scala PRCC è comune e va da -1 a 1.
+Each point is an input PRCC and the vertical bar is its 95% bootstrap interval. The zero line separates positive and negative effects. Points far from zero with narrow intervals indicate dominant, stable factors; intervals crossing zero indicate weak or unresolved effects at the selected sample size. Input axes differ among panels, but the PRCC scale is common from -1 to 1.
 
 ```{r importance-plots, fig.height=10}
 plot_data<-importance[importance$importance_rank<=10,]
@@ -432,12 +509,12 @@ ggplot(plot_data,aes(x=reorder(factor,abs(prcc)),y=prcc,ymin=prcc_low,ymax=prcc_
 
 # Completion status
 
-### Come leggere il controllo conclusivo
+### How to read the final completion check
 
-La tabella riassume campioni richiesti, completi e falliti, oltre al numero complessivo di esecuzioni APSIMx. È il controllo da mostrare prima dei risultati scientifici: un ranking è affidabile solo se l'ensemble previsto è stato sostanzialmente completato e le esclusioni sono documentate. Il file `uncertainty_completion_status.csv` conserva lo stesso riepilogo.
+The table summarises requested, complete, and failed samples and the total number of APSIMx executions. This check should be shown before scientific results: a ranking is credible only when the planned ensemble is substantially complete and exclusions are documented. `uncertainty_completion_status.csv` stores the same summary.
 
 ```{r completion-status}
-status<-data.frame(requested_samples=nrow(uncertainty_design),complete_samples=sum(complete),failed_samples=sum(!complete),baseline_runs=1L,preflight_runs=nrow(input_spec),total_APSIMx_runs=1L+nrow(input_spec)+nrow(uncertainty_design),stringsAsFactors=FALSE)
+status<-data.frame(analysis_profile=profile,requested_samples=nrow(uncertainty_design),bootstrap_replicates=as.integer(params$bootstrap_replicates),complete_samples=sum(complete),failed_samples=sum(!complete),baseline_runs=1L,preflight_runs=nrow(input_spec),total_APSIMx_runs=1L+nrow(input_spec)+nrow(uncertainty_design),stringsAsFactors=FALSE)
 show_table(status,20)
 write.csv(status,file.path(analysis_root,"uncertainty_completion_status.csv"),row.names=FALSE)
 ```
@@ -449,3 +526,30 @@ write.csv(status,file.path(analysis_root,"uncertainty_completion_status.csv"),ro
 - `LeachNO3_kgNha` is nitrate-N leaving the simulated soil profile, not a direct prediction of nitrate reaching the groundwater table.
 - The four outputs retain their native APSIMx units and are ranked separately.
 - The synthetic demonstration soil profile remains the baseline. Results quantify uncertainty around this scenario and must not be interpreted as site-calibrated uncertainty without observed input distributions.
+
+
+# Output locations
+
+The table records the smoke or full profile, the short execution directory, the durable result directory, and the runtime provenance file. Keep the Rmd, `runtime_configuration.csv`, preflight audit, run inventory, output summary, and PRCC rankings together.
+
+```{r output-locations}
+data.frame(analysis_profile=profile,execution_directory=execution_root,analysis_directory=analysis_root,log_directory=log_root,runtime_configuration=file.path(log_root,"runtime_configuration.csv"),stringsAsFactors=FALSE)
+```
+
+
+# Total document elapsed time
+
+```{r total-document-time}
+TOTAL_DOCUMENT_ELAPSED_SECONDS <- as.numeric(
+  difftime(Sys.time(), DOCUMENT_STARTED_AT, units = "secs")
+)
+document_time <- data.frame(
+  analysis_profile = profile,
+  total_render_seconds = TOTAL_DOCUMENT_ELAPSED_SECONDS,
+  total_render_minutes = TOTAL_DOCUMENT_ELAPSED_SECONDS / 60,
+  total_render_hours = TOTAL_DOCUMENT_ELAPSED_SECONDS / 3600,
+  stringsAsFactors = FALSE
+)
+document_time
+write.csv(document_time,file.path(analysis_root,"document_elapsed_time.csv"),row.names=FALSE)
+```
