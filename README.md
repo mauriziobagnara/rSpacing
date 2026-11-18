@@ -55,6 +55,8 @@ source("environment_check.R")
 
 ## Compile Spacing.Tool2
 
+Open PowerShell in the workspace root and run: 
+
 ```powershell
 dotnet restore .\apsim\src\Spacing.Tool2\Spacing.Tool2.csproj 2>&1 |
   Tee-Object .\logs\dotnet_restore.log
@@ -75,6 +77,57 @@ The environment checker also accepts a Release build at:
 
 ```text
 apsim/src/Spacing.Tool2/bin/Release/net8.0/spacing-tool2.dll
+```
+### Install rSpacing package directly from the package source
+
+From the workspace root:
+
+```r
+workspace_root <- normalizePath(
+  ".",
+  winslash = "/",
+  mustWork = TRUE
+)
+
+package_root <- file.path(
+  workspace_root,
+  "rSpacing"
+)
+
+stopifnot(
+  file.exists(
+    file.path(package_root, "DESCRIPTION")
+  )
+)
+
+devtools::install(
+  pkg = package_root,
+  build = TRUE,
+  build_vignettes = TRUE,
+  dependencies = TRUE,
+  upgrade = FALSE
+)
+```
+
+Restart R after installation, then verify the package and open the vignette:
+
+```r
+library(rSpacing)
+
+packageVersion("rSpacing")
+
+vignette(package = "rSpacing")
+
+vignette(
+  "rSpacing-workflow_EN",
+  package = "rSpacing"
+)
+```
+
+The expected package version is:
+
+```text
+0.10.05 or 0.10.5
 ```
 
 ## Copy operational workflows
