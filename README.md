@@ -22,17 +22,15 @@ Do not place `runs/`, `results/`, or `logs/` inside either repository.
 
 ## Repository references
 
-Complete the commit fields before final delivery.
-
 ```text
 rSpacing repository URL: https://github.com/mauriziobagnara/rSpacing
 rSpacing branch: development-Maurizio
-rSpacing tag or commit: <TO_FILL>
+rSpacing tag or commit:
 Expected package version: 0.10.05
 
 Spacing.Tool2 repository URL: https://github.com/mauriziobagnara/APSIMxSpacing
 Spacing.Tool2 branch: main
-Spacing.Tool2 tag or commit: <TO_FILL>
+Spacing.Tool2 tag or commit: 
 Expected runtime version: 0.09.05
 ```
 
