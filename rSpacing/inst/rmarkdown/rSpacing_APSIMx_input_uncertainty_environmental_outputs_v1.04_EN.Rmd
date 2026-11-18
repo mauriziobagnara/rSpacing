@@ -273,9 +273,9 @@ The planned APSIMx workload is `1 + 16 + samples`: one baseline, 16 one-at-a-tim
 ```{r planned-computation-time}
 planned_APSIMx_runs <- 1L + nrow(input_spec) + nrow(uncertainty_design)
 planned_workload <- data.frame(
-The table shows the planned number of executions and their output locations. Execution is sequential and reuse is disabled. With 16 inputs, the smoke profile plans 47 runs (1 baseline, 16 preflight, and 30 scenarios), while the full profile plans 517 runs (1 + 16 + 500).
+  analysis_profile = profile,
   baseline_runs = 1L,
-For presentation, this table documents computational cost and makes clear that all four outputs are obtained from the same run, not from four separate experiments.
+  preflight_runs = nrow(input_spec),
   lhs_runs = nrow(uncertainty_design),
   planned_APSIMx_runs = planned_APSIMx_runs,
   bootstrap_replicates = as.integer(params$bootstrap_replicates),
@@ -313,7 +313,7 @@ run_uncertainty<-function(run_index,scenario,run_kind="sample") {
  args<-c(shQuote(normalize_win(dll_path,TRUE)),"--config",shQuote(normalize_win(config_path,TRUE)),"--request",shQuote(normalize_win(request_path,TRUE)),"--result",shQuote(normalize_win(result_path,FALSE)),"--manifest",shQuote(normalize_win(manifest_path,FALSE))); if(USE_MOCK_WEATHER) args<-c(args,"--mock")
  started<-Sys.time(); exit_status<-system2("dotnet",args=args,stdout=stdout_path,stderr=stderr_path,wait=TRUE); elapsed<-as.numeric(difftime(Sys.time(),started,units="secs")); stderr_text<-if(file.exists(stderr_path)) paste(readLines(stderr_path,warn=FALSE),collapse="\\n") else ""
  result<-if(identical(as.integer(exit_status),0L)&&file.exists(result_path)) tryCatch(jsonlite::read_json(result_path,simplifyVector=TRUE),error=function(e)NULL) else NULL
-For each scenario, the runner creates an independent directory, writes request and configuration JSON files, starts `Spacing.Tool2` through `dotnet`, and reads the result. It retains exit status, logs, duration, and any failure reason. The code is hidden, but these metadata remain available in the diagnostic tables.
+ model_success<-!is.null(result)&&isTRUE(result$success)
  if(!model_success) return(list(model_success=FALSE,outputs_available=FALSE,reason=if(nzchar(stderr_text)) stderr_text else paste("Spacing.Tool2 exit code",exit_status),exit_status=as.integer(exit_status),stderr_path=stderr_path,elapsed_seconds=elapsed))
  env<-extract_environmental_outputs(read_all_tables(result)); c(list(model_success=TRUE,outputs_available=isTRUE(env$available),exit_status=as.integer(exit_status),stderr_path=stderr_path,elapsed_seconds=elapsed),env)
 }
@@ -329,7 +329,7 @@ The baseline verifies that the five-year rotation produces all four outputs. Pre
 baseline_scenario<-list(soil_profile=soil_profile,crops=base_crops); baseline<-run_uncertainty(0L,baseline_scenario,"baseline")
 baseline_row<-data.frame(model_success=baseline$model_success,outputs_available=baseline$outputs_available,soil_c_final=scalar_num(baseline$soil_c_final),n2o_cumulative=scalar_num(baseline$n2o_cumulative),co2c_cumulative=scalar_num(baseline$co2c_cumulative),leach_no3_cumulative=scalar_num(baseline$leach_no3_cumulative),final_date=scalar_chr(baseline$final_date),reason=scalar_chr(baseline$reason),stringsAsFactors=FALSE)
 write.csv(baseline_row,file.path(analysis_root,"baseline_environmental_outputs.csv"),row.names=FALSE)
-The baseline verifies that the five-year rotation produces all four outputs. Preflight then changes one input at a time and checks both physical validity and APSIMx completion. LHS runs begin only after all 16 inputs pass. This avoids discovering after many hours that an input was not transferred correctly.
+
 preflight<-vector("list",nrow(input_spec))
 for(i in seq_len(nrow(input_spec))) { x<-as.list(stats::setNames(rep(1,nrow(input_spec)),input_spec$factor)); x$oc_gradient<-0; x$ph_shift<-0; x$irrigation_threshold_shift<-0; x$irrigation_target_shift<-0; x[[input_spec$factor[i]]]<-input_spec$lower[i]+.75*(input_spec$upper[i]-input_spec$lower[i]); z<-perturb_scenario(x); ck<-validate_scenario(z); rr<-if(ck$ok) run_uncertainty(i,z,"preflight") else list(model_success=FALSE,outputs_available=FALSE,reason=ck$reason,exit_status=NA_integer_,stderr_path="",elapsed_seconds=0); accepted<-ck$ok&&isTRUE(rr$model_success)&&isTRUE(rr$outputs_available); preflight[[i]]<-data.frame(factor=input_spec$factor[i],group=input_spec$group[i],tested_value=x[[input_spec$factor[i]]],scenario_valid=ck$ok,model_success=isTRUE(rr$model_success),outputs_available=isTRUE(rr$outputs_available),accepted=accepted,reason=if(accepted) "" else scalar_chr(rr$reason,ck$reason),exit_status=scalar_num(rr$exit_status),stderr_path=scalar_chr(rr$stderr_path),elapsed_seconds=scalar_num(rr$elapsed_seconds),stringsAsFactors=FALSE) }
 preflight_audit<-do.call(rbind,preflight); write.csv(preflight_audit,file.path(analysis_root,"input_preflight_audit.csv"),row.names=FALSE)
@@ -353,7 +353,7 @@ The row is the unperturbed reference. `soil_c_final` is the stock on the final d
 Each row is one factor tested in isolation. `scenario_valid` checks constraints, `model_success` checks APSIMx execution, `outputs_available` checks extraction of all four outputs, and `accepted` is the final decision. All rows must be accepted. Otherwise, `reason`, `exit_status`, and `stderr_path` indicate where to investigate.
 
 ```{r preflight-results}
-Each row is one factor tested in isolation. `scenario_valid` checks constraints, `model_success` checks APSIMx execution, `outputs_available` checks extraction of all four outputs, and `accepted` is the final decision. All rows must be accepted. Otherwise, `reason`, `exit_status`, and `stderr_path` indicate where to investigate.
+
 ```
 
 # Execute uncertainty ensemble
