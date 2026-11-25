@@ -57,3 +57,57 @@ WORKSPACE_PACKAGES <- c(
   "DBI", "RSQLite", "jsonlite", "processx", "fs", "digest", "ggplot2", "rlang", "patchwork",
   "devtools", "testthat", "knitr", "rmarkdown", "roxygen2", "rcmdcheck",
   "sensitivity", "scales", "ggrepel")
+
+# Plain, console-safe text: no ANSI colours, no carriage returns or other control
+# characters, ASCII only, limited width. Printing raw R CMD check output can crash RStudio.
+ws_clean <- function(x, width = 150) {
+  x <- as.character(x)
+  x <- gsub("\033\\[[0-9;?]*[A-Za-z]", "", x, perl = TRUE, useBytes = TRUE)
+  x <- gsub("[^\\x20-\\x7E\t]", "", x, perl = TRUE, useBytes = TRUE)
+  ifelse(nchar(x) > width, paste0(substr(x, 1, width - 3), "..."), x)
+}
+
+# The last n non-empty lines of a log, cleaned for the console
+ws_log_tail <- function(log, n = 25, width = 150) {
+  if (!file.exists(log)) return(character())
+  lines <- tryCatch(readLines(log, warn = FALSE, encoding = "UTF-8"), error = function(e) character())
+  lines <- ws_clean(lines, width)
+  utils::tail(lines[nzchar(trimws(lines))], n)
+}
+
+# Run a command, write its output (stdout and stderr) to `log`, and return the exit status.
+# The log is appended line by line and closed after each write, so it can be opened
+# (Notepad, Get-Content) while the command runs. Every `heartbeat` seconds a line with
+# the elapsed time and the last line of output is printed to the console.
+ws_run <- function(command, args = character(), log, label = basename(log), heartbeat = 60) {
+  dir.create(dirname(log), recursive = TRUE, showWarnings = FALSE)
+  cat("", file = log)
+  if (!requireNamespace("processx", quietly = TRUE)) {        # fallback: log locked while running
+    quoted <- ifelse(grepl("[[:space:]]", args), shQuote(args), args)
+    return(system2(command, quoted, stdout = log, stderr = log))
+  }
+  p <- processx::process$new(command, args, stdout = "|", stderr = "2>&1", windows_hide_window = TRUE)
+  started <- last_beat <- Sys.time(); last_line <- ""
+  write_lines <- function(lines) {
+    if (!length(lines)) return()
+    cat(lines, file = log, sep = "\n", append = TRUE)
+    lines <- trimws(lines[nzchar(trimws(lines))])
+    if (length(lines)) last_line <<- utils::tail(lines, 1)
+  }
+  while (p$is_alive()) {
+    p$poll_io(2000)
+    write_lines(p$read_output_lines())
+    if (as.numeric(difftime(Sys.time(), last_beat, units = "secs")) >= heartbeat) {
+      cat(format(Sys.time(), "%H:%M:%S"), " ", label, " still running (",
+          round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min). Last output: ",
+          ws_clean(last_line, 110), "\n", sep = "")
+      last_beat <- Sys.time()
+    }
+  }
+  # Drain the remaining output for a few seconds only: a background process started by the
+  # command (e.g. a dotnet build server) may keep the pipe open after the command has ended.
+  for (i in 1:5) { p$poll_io(500); write_lines(p$read_output_lines()) }
+  p$wait()
+  status <- p$get_exit_status()
+  if (is.null(status) || is.na(status)) 1L else status
+}

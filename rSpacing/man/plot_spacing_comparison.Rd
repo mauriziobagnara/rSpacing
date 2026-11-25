@@ -30,7 +30,7 @@ report, then daily), `"crop_summary"`, `"report"` or `"daily"`.}
 `"last"` or `"max"`.}
 }
 \value{
-A `ggplot` object; attribute `data` holds the comparison table.
+A `ggplot` object; [spacing_plot_data()] returns the comparison table.
 }
 \description{
 Aggregates one variable for each result (by the chosen fields) and draws
@@ -41,7 +41,7 @@ result <- readRDS(system.file("extdata", "reference_maize", "result.rds",
   package = "rSpacing"))
 p <- suppressWarnings(plot_spacing_comparison(list(a = result, b = result),
   by = c("scenario_id", "year")))
-head(attr(p, "data"))
+head(spacing_plot_data(p))
 }
 \seealso{
 Other plots: 

@@ -21,7 +21,7 @@ plot_spacing_fertilisation(
 \item{variable}{Optional character scalar. Applied-N column (kg N/ha).}
 }
 \value{
-A `ggplot` object; attribute `data` holds a data frame with
+A `ggplot` object; [spacing_plot_data()] returns a data frame with
   `date`, `nitrogen_kg_ha`, `cumulative_kg_ha` and `year`.
 }
 \description{
@@ -39,7 +39,7 @@ d <- result$csv[[i]]
 d$FertN_kgNha <- ifelse(format(as.Date(d$Clock.Today), "\%m-\%d") == "04-20", 150, 0)
 result$csv[[i]] <- d
 p <- plot_spacing_fertilisation(result, facet_by_year = FALSE)
-max(attr(p, "data")$cumulative_kg_ha)
+max(spacing_plot_data(p)$cumulative_kg_ha)
 }
 \seealso{
 Other plots: 

@@ -12,12 +12,16 @@ if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { throw "dotnet was
 New-Item -ItemType Directory -Path (Join-Path $Root "logs") -Force | Out-Null
 
 Write-Host "Restoring NuGet packages..."
-& dotnet restore $Project *>&1 | Tee-Object -FilePath (Join-Path $Root "logs\dotnet_restore.log")
+# No build servers left in the background (they would keep the log open after the build)
+$env:MSBUILDDISABLENODEREUSE = "1"; $env:DOTNET_CLI_USE_MSBUILD_SERVER = "0"
+& dotnet restore $Project -nodeReuse:false *>&1 | Tee-Object -FilePath (Join-Path $Root "logs\dotnet_restore.log")
 if ($LASTEXITCODE -ne 0) { throw "dotnet restore failed (exit $LASTEXITCODE). See logs\dotnet_restore.log." }
 
 Write-Host "Building Spacing.Tool2 (Debug, net8.0)..."
-& dotnet build $Project --configuration Debug --framework net8.0 --no-restore *>&1 | Tee-Object -FilePath (Join-Path $Root "logs\dotnet_build.log")
-if ($LASTEXITCODE -ne 0) { throw "dotnet build failed (exit $LASTEXITCODE). See logs\dotnet_build.log." }
+& dotnet build $Project --configuration Debug --framework net8.0 --no-restore -nodeReuse:false -p:UseSharedCompilation=false *>&1 | Tee-Object -FilePath (Join-Path $Root "logs\dotnet_build.log")
+$BuildExit = $LASTEXITCODE
+& dotnet build-server shutdown *> $null
+if ($BuildExit -ne 0) { throw "dotnet build failed (exit $BuildExit). See logs\dotnet_build.log." }
 if (-not (Test-Path $Dll)) { throw "Build finished but the DLL is missing: $Dll" }
 
 Write-Host "Spacing.Tool2 built: $Dll"

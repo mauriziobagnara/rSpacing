@@ -52,3 +52,4 @@ URL: https://github.com/GeoModelLab/rSpacing
 BugReports: https://github.com/GeoModelLab/rSpacing/issues
 Config/roxygen2/version: 8.1.1
 VignetteBuilder: knitr
+RoxygenNote: 7.3.1

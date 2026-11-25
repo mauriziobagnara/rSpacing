@@ -595,7 +595,7 @@ check("Results", "summary() finds the soil carbon and nitrogen loss groups",
       all(c("soil_carbon", "nitrogen_loss") %in% summary(res)$groups$group))
 check("Results", "units are read from the DataStore", spacing_variable_unit(res, "Rain_mm") == "mm")
 check("Results", "yield plot carries the yield table",
-      nrow(attr(plot_spacing_yield(res), "data")) >= 5)
+      nrow(spacing_plot_data(plot_spacing_yield(res))) >= 5)
 ```
 
 # Run specifications (for calibration and sensitivity)

@@ -39,7 +39,7 @@ test_that("atlas returns named plots and comparison combines runs", {
   expect_true(length(atlas)>0)
   comparison <- plot_spacing_comparison(list(x,make_specialised_result("high",1.1)),variable="Yield")
   expect_s3_class(comparison,"ggplot")
-  expect_equal(length(unique(attr(comparison,"data")$scenario_id)),2L)
+  expect_equal(length(unique(spacing_plot_data(comparison)$scenario_id)),2L)
 })
 
 test_that("report plots keep only the harvests of the variable's crop", {

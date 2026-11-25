@@ -29,7 +29,7 @@ name (default e.g. `SoilC_kgCha`).}
 [spacing_soil_layers()].}
 }
 \value{
-A `ggplot` object; for the stock types, attribute `data` holds the
+A `ggplot` object; for the stock types, [spacing_plot_data()] returns the
   daily carbon table used.
 }
 \description{

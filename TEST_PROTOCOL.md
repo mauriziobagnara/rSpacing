@@ -28,7 +28,7 @@ The code comes from the branches `release-0.10.09` of rSpacing (this workspace) 
 
 Do not turn a FAIL into a PASS by editing source files. Record the evidence and stop (section 7).
 
-For T05-T14, `run_test()` applies the criterion itself and writes PASS or FAIL, with a one-line explanation, to `logs/test_status.csv`. `test_status()` shows the latest result of each test.
+The whole cycle can also run unattended with `run_all.R` (README, *Unattended run of everything*); it applies the same criteria and stop conditions and writes `logs/run_all_summary.csv`. For T05-T14, `run_test()` applies the criterion itself and writes PASS or FAIL, with a one-line explanation, to `logs/test_status.csv`. `test_status()` shows the latest result of each test.
 
 ## 4. Evidence
 

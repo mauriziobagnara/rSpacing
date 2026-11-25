@@ -117,7 +117,7 @@ test_that("CLI includes a validated run-spec path", {
   write_spacing_run_spec(make_run_spec(), path)
   args <- rSpacing:::build_spacing_args(cfg, req, path)
   expect_true("--run-spec" %in% args)
-  expect_equal(args[match("--run-spec", args) + 1L], normalizePath(path, winslash = "/"))
+  expect_equal(normalizePath(args[match("--run-spec", args) + 1L], winslash = "/"), normalizePath(path, winslash = "/"))
 })
 
 test_that("calibration parameters can be updated without changing code", {

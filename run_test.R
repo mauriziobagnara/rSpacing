@@ -38,15 +38,15 @@ run_test <- function(id, open_report = interactive()) {
   row <- TESTS[TESTS$id == id, ]
   message(id, ": ", row$what, " (about ", row$minutes, " min). Log: ", log_file)
   started <- Sys.time()
-  status <- system2(ws_rscript(), c("--no-save", "--no-restore", shQuote(file.path(root, "tools", "run_step.R")),
-                                    id, shQuote(root)),
-                    stdout = log_file, stderr = log_file)   # the child inherits RSTUDIO_PANDOC
+  status <- ws_run(ws_rscript(), c("--no-save", "--no-restore", file.path(root, "tools", "run_step.R"), id, root),
+                   log_file, label = id)   # the child inherits RSTUDIO_PANDOC
   minutes <- as.numeric(difftime(Sys.time(), started, units = "mins"))
   res <- test_status()
   res <- res[res$test == id, , drop = FALSE]
   if (!nrow(res) || status != 0) {
     message(id, " FAIL after ", round(minutes, 1), " min. Last lines of the log:")
-    cat(utils::tail(readLines(log_file, warn = FALSE), 25), sep = "\n")
+    writeLines(ws_log_tail(log_file, 25))
+    message("Full log: ", log_file)
     return(invisible(FALSE))
   }
   message(id, " ", res$status, " (", round(minutes, 1), " min): ", res$detail)

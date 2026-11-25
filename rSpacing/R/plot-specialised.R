@@ -151,14 +151,14 @@ plot_spacing_atlas <- function(result,
 #'   `"cultivar"`.
 #' @param yield_variable Optional character scalar. Yield column to use.
 #' @param title Optional plot title.
-#' @return A `ggplot` object; attribute `data` holds the yield table used.
+#' @return A `ggplot` object; [spacing_plot_data()] returns the yield table used.
 #' @family plots
 #' @export
 #' @examples
 #' result <- readRDS(system.file("extdata", "reference_maize", "result.rds",
 #'   package = "rSpacing"))
 #' p <- suppressWarnings(plot_spacing_yield(result))
-#' head(attr(p, "data"))
+#' head(spacing_plot_data(p))
 plot_spacing_yield <- function(result, by = c("year", "crop", "cultivar"),
                                yield_variable = NULL, title = NULL) {
   .validate_spacing_result(result)
@@ -196,7 +196,7 @@ plot_spacing_yield <- function(result, by = c("year", "crop", "cultivar"),
     if (!(facet_name == "cultivar" && all(is.na(normal$cultivar))))
       p <- p + ggplot2::facet_wrap(stats::as.formula(paste("~", facet_name)), scales = "free_x")
   }
-  attr(p, "data") <- normal
+  p <- .spacing_attach_plot_data(p, normal)
   p
 }
 
@@ -209,7 +209,7 @@ plot_spacing_yield <- function(result, by = c("year", "crop", "cultivar"),
 #' @param cumulative Logical. Add the cumulative amount.
 #' @param facet_by_year Logical. One facet per calendar year.
 #' @param variable Optional character scalar. Irrigation column (mm).
-#' @return A `ggplot` object; attribute `data` holds a data frame with `date`,
+#' @return A `ggplot` object; [spacing_plot_data()] returns a data frame with `date`,
 #'   `year`, daily and cumulative irrigation (mm).
 #' @family plots
 #' @export
@@ -217,7 +217,7 @@ plot_spacing_yield <- function(result, by = c("year", "crop", "cultivar"),
 #' result <- readRDS(system.file("extdata", "reference_maize", "result.rds",
 #'   package = "rSpacing"))
 #' p <- plot_spacing_irrigation(result, facet_by_year = FALSE)
-#' tail(attr(p, "data"), 3)
+#' tail(spacing_plot_data(p), 3)
 plot_spacing_irrigation <- function(result, cumulative = TRUE,
                                     facet_by_year = TRUE, variable = NULL) {
   data <- spacing_daily(result, strict = TRUE, allow_empty = FALSE)
@@ -243,7 +243,7 @@ plot_spacing_irrigation <- function(result, cumulative = TRUE,
   }
   if (isTRUE(facet_by_year)) p <- p + ggplot2::facet_wrap(~year, scales="free_x", ncol=1)
   p <- p + ggplot2::labs(title="APSIMx irrigation", subtitle=paste("Total:", round(sum(out$irrigation_mm), 1), "mm"))
-  attr(p, "data") <- out
+  p <- .spacing_attach_plot_data(p, out)
   p
 }
 
@@ -258,7 +258,7 @@ plot_spacing_irrigation <- function(result, cumulative = TRUE,
 #' @param cumulative Logical. Add the cumulative amount.
 #' @param facet_by_year Logical. One facet per calendar year.
 #' @param variable Optional character scalar. Applied-N column (kg N/ha).
-#' @return A `ggplot` object; attribute `data` holds a data frame with
+#' @return A `ggplot` object; [spacing_plot_data()] returns a data frame with
 #'   `date`, `nitrogen_kg_ha`, `cumulative_kg_ha` and `year`.
 #' @family plots
 #' @export
@@ -271,7 +271,7 @@ plot_spacing_irrigation <- function(result, cumulative = TRUE,
 #' d$FertN_kgNha <- ifelse(format(as.Date(d$Clock.Today), "%m-%d") == "04-20", 150, 0)
 #' result$csv[[i]] <- d
 #' p <- plot_spacing_fertilisation(result, facet_by_year = FALSE)
-#' max(attr(p, "data")$cumulative_kg_ha)
+#' max(spacing_plot_data(p)$cumulative_kg_ha)
 plot_spacing_fertilisation <- function(result, cumulative = TRUE,
                                        facet_by_year = TRUE, variable = NULL) {
   data <- spacing_daily(result, strict = TRUE, allow_empty = FALSE)
@@ -299,7 +299,7 @@ plot_spacing_fertilisation <- function(result, cumulative = TRUE,
   }
   if (isTRUE(facet_by_year)) p <- p + ggplot2::facet_wrap(~year,scales="free_x",ncol=1)
   p <- p + ggplot2::labs(title="APSIMx fertilisation",subtitle=paste("Total:",round(sum(out$nitrogen_kg_ha),1),"kg N/ha"))
-  attr(p,"data") <- out
+  p <- .spacing_attach_plot_data(p, out)
   p
 }
 
@@ -315,7 +315,7 @@ plot_spacing_fertilisation <- function(result, cumulative = TRUE,
 #'   name (default e.g. `SoilC_kgCha`).
 #' @param thickness Optional layer thicknesses (mm) for the profile types; see
 #'   [spacing_soil_layers()].
-#' @return A `ggplot` object; for the stock types, attribute `data` holds the
+#' @return A `ggplot` object; for the stock types, [spacing_plot_data()] returns the
 #'   daily carbon table used.
 #' @family plots
 #' @export
@@ -363,7 +363,7 @@ plot_spacing_soil_carbon <- function(result,
     ggplot2::geom_hline(yintercept=if(type=="stock") NA_real_ else 0,colour="grey60") +
     ggplot2::geom_line(colour="saddlebrown",linewidth=.8) +
     ggplot2::labs(title="Soil carbon",x="Date",y=ylab)
-  attr(p,"data") <- out
+  p <- .spacing_attach_plot_data(p, out)
   p
 }
 
@@ -383,7 +383,7 @@ plot_spacing_soil_carbon <- function(result,
 #'   `"crop"` and `"cultivar"`.
 #' @param statistic Character. Aggregation: `"auto"`, `"sum"`, `"mean"`,
 #'   `"last"` or `"max"`.
-#' @return A `ggplot` object; attribute `data` holds the comparison table.
+#' @return A `ggplot` object; [spacing_plot_data()] returns the comparison table.
 #' @family plots
 #' @family scenarios
 #' @export
@@ -392,7 +392,7 @@ plot_spacing_soil_carbon <- function(result,
 #'   package = "rSpacing"))
 #' p <- suppressWarnings(plot_spacing_comparison(list(a = result, b = result),
 #'   by = c("scenario_id", "year")))
-#' head(attr(p, "data"))
+#' head(spacing_plot_data(p))
 plot_spacing_comparison <- function(results, variable = "Yield",
                                     source = c("auto", "crop_summary", "report", "daily"),
                                     by = c("scenario_id", "crop", "cultivar"),
@@ -448,6 +448,31 @@ plot_spacing_comparison <- function(results, variable = "Yield",
     ggplot2::geom_col(position="dodge") + ggplot2::labs(title=paste("Comparison:",variable),x=x_name,y=paste(statistic,variable),fill="Scenario")
   if (length(by)>=2L && by[[2L]] %in% names(summary) && !all(is.na(summary[[by[[2L]]]])))
     p <- p + ggplot2::facet_wrap(stats::as.formula(paste("~",by[[2L]])),scales="free_x")
-  attr(p,"data") <- summary
+  p <- .spacing_attach_plot_data(p, summary)
+  p
+}
+
+#' Summary table attached to an rSpacing plot
+#'
+#' The specialised plotting functions (for example [plot_spacing_yield()],
+#' [plot_spacing_soil_carbon()], [plot_spacing_irrigation()],
+#' [plot_spacing_fertilisation()] and [plot_spacing_compare()]) attach the
+#' tidy table they plotted to the returned ggplot object. This accessor
+#' returns that table. It works with ggplot2 3.x and with ggplot2 4.x, where
+#' the plot's own `data` slot must not be overwritten.
+#'
+#' @param plot A ggplot object returned by an rSpacing plotting function.
+#' @return A data frame, or `NULL` when no table is attached.
+#' @examples
+#' p <- ggplot2::ggplot(data.frame(x = 1:3, y = 3:1), ggplot2::aes(x, y))
+#' p <- rSpacing:::.spacing_attach_plot_data(p, data.frame(x = 1:3))
+#' spacing_plot_data(p)
+#' @export
+spacing_plot_data <- function(plot) {
+  attr(plot, "spacing_data", exact = TRUE)
+}
+
+.spacing_attach_plot_data <- function(p, table) {
+  attr(p, "spacing_data") <- table
   p
 }

@@ -23,7 +23,8 @@ The previous stable versions (rSpacing 0.10.05, Spacing.Tool2 0.09.05) are on `d
 ├── build_tool2.ps1         # step T02
 ├── install_rspacing.R      # step T03
 ├── environment_check.R     # step T04
-├── run_test.R              # steps T05-T14
+├── run_test.R              # steps T05-T14, one at a time
+├── run_all.R               # all steps, unattended
 ├── tools/                  # helpers used by the scripts above
 ├── rSpacing/               # R package source, version 0.10.09
 ├── reference_results/      # results the tests are compared with
@@ -131,6 +132,19 @@ Each test runs in a separate R process, checks its own result against its PASS c
 | T14 | input uncertainty, full analysis (500 samples, 521 runs) | about 75 min |
 
 Run T13 and T14 only after T05-T12 have passed. Details and PASS criteria are in `TEST_PROTOCOL.md`.
+
+## Unattended run of everything
+
+`run_all.R` does T00-T14 by itself: it creates the folders, builds Spacing.Tool2, installs rSpacing, checks the environment and runs every test, stopping at the first failure. With the full analyses it takes about 2.5 hours (about 40 minutes with `full=FALSE`). From PowerShell in the workspace root (use the path of your R version):
+
+```powershell
+& "C:\Program Files\R\R-4.4.2\bin\Rscript.exe" run_all.R
+& "C:\Program Files\R\R-4.4.2\bin\Rscript.exe" run_all.R full=FALSE apsim_clone="C:/Users/<you>/Documents/GitHub/APSIMxSpacing"
+```
+
+or in RStudio: open `run_all.R`, set the workspace root as working directory, and choose *Source as Background Job*. Options (`key=value`): `apsim_clone` (refresh `apsim/` from the APSIMxSpacing clone first, i.e. T00), `build`, `install`, `full` (T13-T14), `stop_on_fail`; defaults are at the top of the script.
+
+Keep the computer awake while it runs. At the end, `logs/run_all_summary.csv` lists every step with PASS / FAIL / SKIPPED, time and detail; each step's console output is in `logs/run_all/` and `logs/tests/`, and the reports are in `results/test_results/`.
 
 ## Using the workflows for your own work
 

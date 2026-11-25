@@ -22,7 +22,7 @@ plot_spacing_yield(
 \item{title}{Optional plot title.}
 }
 \value{
-A `ggplot` object; attribute `data` holds the yield table used.
+A `ggplot` object; [spacing_plot_data()] returns the yield table used.
 }
 \description{
 Finds the yield column (crop summary first, then the report table; names
@@ -33,7 +33,7 @@ coloured by crop or cultivar where those are known.
 result <- readRDS(system.file("extdata", "reference_maize", "result.rds",
   package = "rSpacing"))
 p <- suppressWarnings(plot_spacing_yield(result))
-head(attr(p, "data"))
+head(spacing_plot_data(p))
 }
 \seealso{
 Other plots: 

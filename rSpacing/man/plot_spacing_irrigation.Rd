@@ -21,7 +21,7 @@ plot_spacing_irrigation(
 \item{variable}{Optional character scalar. Irrigation column (mm).}
 }
 \value{
-A `ggplot` object; attribute `data` holds a data frame with `date`,
+A `ggplot` object; [spacing_plot_data()] returns a data frame with `date`,
   `year`, daily and cumulative irrigation (mm).
 }
 \description{
@@ -32,7 +32,7 @@ irrigation), optionally with its cumulative total.
 result <- readRDS(system.file("extdata", "reference_maize", "result.rds",
   package = "rSpacing"))
 p <- plot_spacing_irrigation(result, facet_by_year = FALSE)
-tail(attr(p, "data"), 3)
+tail(spacing_plot_data(p), 3)
 }
 \seealso{
 Other plots: 
