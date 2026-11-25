@@ -1,0 +1,6 @@
+Crop,SowDate,HarvestDate,Yield_kgha,DeltaSOC_kgCha,N2O_kgNha,CO2C_kgCha,LeachNO3_kgNha,EndReason
+Soybean,2020-05-01,2020-10-02,5374,-55.1,0.5988,821.0,5.234,harvested
+Soybean,2023-05-01,2023-10-01,5182,53.0,0.3971,1911.5,2.272,harvested
+Wheat,2020-10-10,2021-06-30,3326,-851.1,1.0965,2882.9,11.987,harvested
+Wheat,2023-10-10,2024-06-29,4062,-1048.5,1.1602,3122.7,8.391,harvested
+Maize,2022-04-01,2022-09-06,13431,-885.4,2.9910,1233.2,5.150,harvested

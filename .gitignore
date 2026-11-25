@@ -1,8 +1,11 @@
-.Rproj.user
+# Created locally by the workspace scripts: not tracked
+/apsim/
+/workflows/
+/runs/
+/results/
+/logs/
+# R and RStudio
+.Rproj.user/
 .Rhistory
 .RData
 .Ruserdata
-.Rcheck/
-check/
-*.tar.gz
-validation
