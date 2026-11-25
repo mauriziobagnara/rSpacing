@@ -1,0 +1,640 @@
+---
+title: "rSpacing cookbook: every scenario option, run and checked with Spacing.Tool2, v1.00 EN"
+author: "Maurizio Bagnara"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    df_print: paged
+params:
+  workspace_root: ".."
+  output_subdir: "cookbook_v100"
+  build_configuration: "Debug"
+  target_framework: "net8.0"
+  tool2_dll: null
+  rspacing_lib: null
+  stop_on_failed_check: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 5.5)
+DOCUMENT_STARTED_AT <- Sys.time()
+```
+
+# How to use this cookbook
+
+Each recipe shows how to write one part of a scenario in R with **rSpacing**, runs it with **Spacing.Tool2** and APSIM, and then **checks the result**. For example, the fertiliser applied at a stage must appear in the daily output on the day after that stage. Every check is collected in the table at the end of the document. If any check fails, the document stops (`params$stop_on_failed_check`), so a successful render means that every option worked as described.
+
+The code is shown on purpose: copy any recipe into your own script. The runs use the Tool2 mock weather for Gualtieri (RE) and a demonstration soil, so the numbers illustrate the mechanics and are not agronomic results.
+
+**Requirements**
+
+| Item | Version |
+|---|---|
+| rSpacing | >= 0.10.9 (workspace step T03: `source("install_rspacing.R")`) |
+| Spacing.Tool2 | >= 0.09.10, built in Visual Studio (Debug or Release) |
+| R packages | `ggplot2`, `jsonlite`, `patchwork` (installed with rSpacing) |
+
+Install rSpacing once with the workspace script `install_rspacing.R` (step T03 of the workspace README).
+
+## Workspace and Tool2
+
+This chunk finds the workspace folders and the compiled Tool2, and loads rSpacing. Nothing is run yet.
+
+```{r workspace}
+if (!is.null(params$rspacing_lib) && nzchar(params$rspacing_lib))
+  .libPaths(c(params$rspacing_lib, .libPaths()))
+if (!requireNamespace("rSpacing", quietly = TRUE) || packageVersion("rSpacing") < "0.10.9")
+  stop("rSpacing >= 0.10.9 is required: run source(\"install_rspacing.R\") in the workspace root (step T03)")
+library(rSpacing)
+library(ggplot2)
+
+WORKSPACE_ROOT <- normalizePath(params$workspace_root, winslash = "/", mustWork = TRUE)
+SPACING_ROOT   <- file.path(WORKSPACE_ROOT, "apsim")
+WORK_ROOT      <- file.path(WORKSPACE_ROOT, "runs", params$output_subdir)
+OUTPUT_ROOT    <- file.path(WORKSPACE_ROOT, "results", params$output_subdir)
+dir.create(WORK_ROOT, recursive = TRUE, showWarnings = FALSE)
+dir.create(OUTPUT_ROOT, recursive = TRUE, showWarnings = FALSE)
+
+dll_candidates <- if (!is.null(params$tool2_dll) && nzchar(params$tool2_dll)) params$tool2_dll else
+  file.path(SPACING_ROOT, "src", "Spacing.Tool2", "bin",
+            unique(c(params$build_configuration, "Debug", "Release")),
+            params$target_framework, "spacing-tool2.dll")
+TOOL2_DLL <- dll_candidates[file.exists(dll_candidates)][1]
+if (is.na(TOOL2_DLL)) stop("spacing-tool2.dll not found. Build Spacing.Tool2 first. Checked: ",
+                           paste(dll_candidates, collapse = "; "))
+if (!nzchar(Sys.which("dotnet"))) stop("dotnet was not found on the PATH")
+
+data.frame(item = c("rSpacing", "workspace", "Tool2 DLL", "runs", "results"),
+           value = c(as.character(packageVersion("rSpacing")), WORKSPACE_ROOT, TOOL2_DLL,
+                     WORK_ROOT, OUTPUT_ROOT))
+```
+
+## Two helpers used by every recipe
+
+`run_recipe()` runs a scenario in its own folder. It writes a copy of `apsim/spacing.config.json` whose weather and output folders point inside that folder, so recipes never overwrite each other. It returns the run (`spacing_run`) and the outputs read back into R (`spacing_result`).
+
+`check()` records one expected behaviour and whether it held.
+
+```{r helpers}
+run_recipe <- function(scenario) {
+  dir <- file.path(WORK_ROOT, scenario$id)
+  if (dir.exists(dir)) unlink(dir, recursive = TRUE)        # every render starts clean
+  dir.create(dir, recursive = TRUE)
+  cfg_json <- jsonlite::fromJSON(file.path(SPACING_ROOT, "spacing.config.json"))
+  cfg_json$TempWeatherDir <- file.path(dir, "weather")
+  cfg_json$OutputDir      <- file.path(dir, "output")
+  cfg_file <- file.path(dir, "spacing.config.json")
+  jsonlite::write_json(cfg_json, cfg_file, auto_unbox = TRUE, pretty = TRUE)
+  cfg <- spacing_config(apsim_dir = SPACING_ROOT, config_file = cfg_file,
+                        use_compiled = TRUE, executable = TOOL2_DLL,
+                        run_root = file.path(dir, "runs"))
+  run <- run_spacing(cfg, scenario, echo = FALSE, error_on_status = FALSE)
+  result <- if (identical(run$status, 0L)) read_spacing(run) else NULL
+  list(run = run, result = result)
+}
+
+CHECKS <- data.frame(recipe = character(), check = character(), passed = logical(),
+                     detail = character(), stringsAsFactors = FALSE)
+check <- function(recipe, what, ok, detail = "") {
+  ok <- isTRUE(ok)
+  CHECKS[nrow(CHECKS) + 1L, ] <<- list(recipe, what, ok, as.character(detail))
+  cat(if (ok) "PASS" else "FAIL", "-", what, if (nzchar(detail)) paste0("(", detail, ")"), "\n")
+  invisible(ok)
+}
+
+as_day <- function(x) as.Date(substr(as.character(x), 1, 10))   # Clock.Today -> Date
+days_with <- function(d, column) as_day(d$Clock.Today[!is.na(d[[column]]) & d[[column]] > 0])
+first_day_at_stage <- function(d, crop, stage_index, after = as.Date("1900-01-01")) {
+  s <- d[[paste0(crop, "_Stage")]]
+  as_day(d$Clock.Today)[which(as_day(d$Clock.Today) > after & !is.na(s) & s >= stage_index)[1]]
+}
+```
+
+# Names: cultivars, stages, fertilisers and residues
+
+Every name used in a scenario must be one that APSIM knows. rSpacing ships the APSIM tables, so a wrong name fails in R with a clear message, before Tool2 is run.
+
+```{r names}
+cultivars <- spacing_cultivars()
+table(cultivars$crop)
+subset(cultivars, standard)                       # cultivars of the standard rotation
+head(spacing_cultivars("Oats"), 4)
+spacing_crop_stages("Wheat")                       # stage names usable as triggers
+spacing_fertiliser_types()[1:6, ]                  # APSIM fertiliser types and N fraction
+head(spacing_residue_types())                      # surface organic matter types
+spacing_validate_cultivar("Wheat", "Claire")
+```
+
+```{r names-checks}
+check("Names", "standard cultivars are Claire, B_130 and Generic_MG1",
+      setequal(subset(cultivars, standard)$cultivar, c("Claire", "B_130", "Generic_MG1")))
+check("Names", "an unknown cultivar is refused in R",
+      inherits(try(spacing_validate_cultivar("Wheat", "NotACultivar"), silent = TRUE), "try-error"))
+check("Names", "wheat stage MaximumSpikeletPrimordia exists",
+      "MaximumSpikeletPrimordia" %in% spacing_crop_stages("Wheat")$stage)
+```
+
+# Recipe 1: site, soil and one crop with standard management
+
+A scenario needs crops (`spacing_crop()`), a site and a period. A soil (`spacing_soil_profile()`) is optional: without one, Tool2 uses its mock soil. The soil below is the demonstration silt loam used by the five-year workflow. Depths are in cm, water contents in m3/m3, OC in %, and initial NO3 and NH4 in kg N/ha per layer.
+
+```{r recipe1-soil}
+layers <- data.frame(
+  DepthTop    = c(0, 15, 30, 60, 90, 120),
+  DepthBottom = c(15, 30, 60, 90, 120, 150),
+  BD   = c(1.28, 1.33, 1.39, 1.43, 1.46, 1.49),
+  LL15 = c(.14, .15, .16, .16, .16, .15),
+  DUL  = c(.31, .32, .33, .32, .31, .30),
+  SAT  = c(.46, .45, .44, .43, .42, .41),
+  SW   = c(.28, .29, .30, .29, .28, .27),          # initial water
+  OC   = c(1.45, 1.15, .75, .48, .32, .24),
+  PH   = c(7.2, 7.3, 7.4, 7.5, 7.6, 7.7),
+  NO3  = c(18, 12, 8, 5, 3.5, 2.5),
+  NH4  = c(2, 1.5, 1, .7, .5, .4),
+  Sand = c(20, 19, 18, 20, 22, 24), Silt = c(58, 59, 57, 54, 52, 50), Clay = c(22, 22, 25, 26, 26, 26))
+soil <- spacing_soil_profile(layers, "GUALTIERI_LOAM_DEMO_001", soil_type = "Silt loam (demo)")
+soil
+```
+
+The maize crop has a sowing window, the plant population (plants/m2), sowing depth and row spacing (mm), plus four kinds of management:
+
+- **Fertilisation:** a dose at sowing plus split applications. Here 50 kg N/ha at sowing and 100 kg N/ha 35 days later, as urea.
+- **Automatic irrigation:** when available water falls below `threshold` (fraction of the extractable water), it refills to `target`, at most `max_application_mm` per day, within the window.
+- **Tillage at sowing:** `"conventional"`, `"minimum"` or `"no-till"`. Each sets the fraction of residue incorporated and the depth.
+- **Organic N at sowing:** manure, given as kg N/ha.
+
+```{r recipe1-run}
+maize <- spacing_crop("Maize", "B_130", sowing_window = c("1-apr", "10-may"),
+  density = 7.5, depth_mm = 50, row_spacing_mm = 750,
+  fertilisation = spacing_fertilisation(50, list(
+    spacing_fertiliser_application(100, trigger = "DaysAfterSowing", days_after_sowing = 35))),
+  irrigation = spacing_irrigation(TRUE, threshold = 0.50, target = 0.85, max_application_mm = 35,
+                                  window_start = "1-jun", window_end = "31-aug"),
+  tillage = spacing_tillage("conventional"),
+  organic = spacing_organic_n(25, residue_type = "manure", cn_ratio = 15))
+
+r1 <- run_recipe(new_spacing_scenario("r1_maize", list(maize), soil = soil,
+                                      latitude = 44.90, longitude = 10.63,
+                                      start_year = 2021, end_year = 2021))
+r1$run$result$yields
+spacing_crop_summary(r1$result)
+```
+
+The inputs that Tool2 completed with defaults are listed in the result. For a real site, give those soil columns explicitly (see `?spacing_soil_profile`).
+
+```{r recipe1-defaults}
+head(r1$run$result$inputs$soil_defaults_applied, 6)
+```
+
+```{r recipe1-checks}
+d1 <- spacing_daily(r1$result); cs1 <- spacing_crop_summary(r1$result)
+sow1 <- as.Date(cs1$SowDate[1])
+check("1 Soil and one crop", "Tool2 run succeeded", r1$run$status == 0L)
+check("1 Soil and one crop", "the soil comes from the request, not the mock",
+      r1$run$result$inputs$soil_input == "request", r1$run$result$inputs$soil_input)
+check("1 Soil and one crop", "sowing inside the window 1 Apr - 10 May",
+      sow1 >= as.Date("2021-04-01") && sow1 <= as.Date("2021-05-10"), format(sow1))
+check("1 Soil and one crop", "50 kg N at sowing and 100 kg N 35 days later",
+      identical(days_with(d1, "FertN_kgNha"), c(sow1, sow1 + 35)) &&
+      isTRUE(all.equal(sum(d1$FertN_kgNha), 150)), paste(days_with(d1, "FertN_kgNha"), collapse = ", "))
+check("1 Soil and one crop", "25 kg organic N at sowing",
+      isTRUE(all.equal(d1$OrgN_kgNha[as_day(d1$Clock.Today) == sow1], 25)))
+irr1 <- d1[d1$Irrig_mm > 0, ]
+check("1 Soil and one crop", "automatic irrigation only from 1 Jun to 31 Aug, at most 35 mm a day",
+      nrow(irr1) > 0 && all(format(as_day(irr1$Clock.Today), "%m-%d") >= "06-01") &&
+      all(format(as_day(irr1$Clock.Today), "%m-%d") <= "08-31") && max(irr1$Irrig_mm) <= 35 + 1e-6,
+      sprintf("%d irrigations, %.0f mm", nrow(irr1), sum(irr1$Irrig_mm)))
+check("1 Soil and one crop", "maize harvested with a yield", cs1$Yield_kgha[1] > 0 && cs1$EndReason[1] == "harvested")
+```
+
+# Recipe 2: timing triggers and extra report variables
+
+Operations can be timed in several ways:
+
+| Trigger | Fertiliser | Irrigation event | Organic / tillage operation |
+|---|---|---|---|
+| `"Sowing"` | yes | yes | yes |
+| `"DaysAfterSowing"` | yes | yes | yes |
+| `"Date"` (`d-mmm`, while the crop is in the field) | yes | yes | yes |
+| `"Stage"` (APSIM stage name) | yes | yes | no |
+| `"DaysAfterPreviousHarvest"` (before sowing) | yes | yes | yes |
+
+This recipe sows on a fixed date (`sowing_date`, with `sowing_window = NULL`). It also sets the fertiliser type and placement depth, and adds three scheduled irrigations instead of automatic ones. `spacing_report_spec()` adds variables to the outputs, using the APSIM Report syntax.
+
+A stage-triggered operation is applied **on the day after** APSIM reaches the stage. Tool2 checks the stage at the start of the day.
+
+```{r recipe2-run}
+maize_fixed <- spacing_crop("Maize", "B_130", sowing_window = NULL, sowing_date = "20-apr",
+  density = 7.5, depth_mm = 50, row_spacing_mm = 750,
+  fertilisation = spacing_fertilisation(40, list(
+    spacing_fertiliser_application(80, "NH4NO3N", trigger = "Date", date = "1-jun"),
+    spacing_fertiliser_application(40, "UAN_N", trigger = "Stage", stage = "FlagLeaf", depth_mm = 50))),
+  irrigation_schedule = list(
+    spacing_irrigation_event(30, "DaysAfterSowing", days = 40),
+    spacing_irrigation_event(40, "Stage", stage = "Flowering"),
+    spacing_irrigation_event(35, "Date", date = "15-jul")))
+
+r2 <- run_recipe(new_spacing_scenario("r2_triggers", list(maize_fixed), soil = soil,
+  latitude = 44.90, longitude = 10.63, start_year = 2021, end_year = 2021,
+  report = spacing_report_spec(
+    harvest_variables = "[Maize].Grain.N * 10 as Maize_GrainN_kgha",   # grain N, kg N/ha
+    daily_variables   = "[Weather].MeanT as Tmean")))
+
+d2 <- spacing_daily(r2$result)
+d2[d2$FertN_kgNha > 0 | d2$Irrig_mm > 0,
+   c("Clock.Today", "FertN_kgNha", "Irrig_mm", "Maize_Stage", "Maize_StageName")]
+spacing_report(r2$result)[, c("Clock.Today", "SowDate", "Maize_GrainYield_kgha", "Maize_GrainN_kgha")]
+```
+
+```{r recipe2-checks}
+sow2 <- as.Date("2021-04-20")
+flag_day <- first_day_at_stage(d2, "Maize", 6)    # FlagLeaf is stage 6 of maize
+flow_day <- first_day_at_stage(d2, "Maize", 7)    # Flowering is stage 7
+check("2 Triggers", "sown on the fixed date 20 Apr",
+      as.Date(spacing_crop_summary(r2$result)$SowDate[1]) == sow2)
+check("2 Triggers", "fertiliser on 20 Apr (sowing), 1 Jun (date) and the day after FlagLeaf (stage)",
+      identical(days_with(d2, "FertN_kgNha"), sort(c(sow2, as.Date("2021-06-01"), flag_day + 1))),
+      paste(days_with(d2, "FertN_kgNha"), collapse = ", "))
+check("2 Triggers", "irrigation 40 days after sowing, the day after Flowering, and on 15 Jul",
+      identical(days_with(d2, "Irrig_mm"), sort(c(sow2 + 40, flow_day + 1, as.Date("2021-07-15")))),
+      paste(days_with(d2, "Irrig_mm"), collapse = ", "))
+check("2 Triggers", "scheduled amounts 30 + 40 + 35 mm", isTRUE(all.equal(sum(d2$Irrig_mm), 105)))
+check("2 Triggers", "extra harvest variable Maize_GrainN_kgha is reported",
+      "Maize_GrainN_kgha" %in% names(spacing_report(r2$result)))
+check("2 Triggers", "extra daily variable Tmean is reported", "Tmean" %in% names(d2))
+```
+
+# Recipe 3: between two crops
+
+Several things happen in the gap between wheat harvest and maize sowing in this recipe:
+
+- **Initial surface residue:** `spacing_surface_residue()` puts residue on the surface at the start (3 t/ha of wheat straw).
+- **Residue removal:** `spacing_residue_removal(0.7)` removes 70% of the surface residue when the wheat is harvested, as when straw is baled. `method = "burn"` is accounted the same way.
+- **Operations before sowing:** `"DaysAfterPreviousHarvest"` places fertiliser, organic amendments and tillage after the harvest of the previous crop.
+- **Extra tillage:** `tillage_operations` adds tillage on a date; when it is given, it replaces the single `tillage` at sowing.
+- **Sowing rule:** `spacing_sowing_rule()` sows only when the soil has enough water, enough recent rain and a warm enough soil. With `sow_at_window_end = TRUE` it sows anyway on the last day of the window.
+
+```{r recipe3-run}
+wheat <- spacing_crop("Wheat", "Claire", c("10-oct", "20-nov"), 180, 35, 180,
+  fertilisation = spacing_fertilisation(30),
+  residue_removal = spacing_residue_removal(0.7, method = "removal"))
+
+maize_after_wheat <- spacing_crop("Maize", "B_130", c("1-apr", "15-may"), 7.5, 50, 750,
+  sowing_rule = spacing_sowing_rule(min_esw_mm = 40, esw_depth_mm = 300, min_rain_mm = 5, rain_days = 5,
+                                    min_soil_temp_c = 12, temp_days = 5, sow_at_window_end = TRUE),
+  fertilisation = spacing_fertilisation(50, list(
+    spacing_fertiliser_application(30, trigger = "DaysAfterPreviousHarvest", days_after_sowing = 20))),
+  organic_applications = list(
+    spacing_organic_application(40, "manure", 15, trigger = "DaysAfterPreviousHarvest", days = 30)),
+  tillage_operations = list(
+    spacing_tillage_operation("conventional", "Date", date = "15-nov"),   # autumn ploughing
+    spacing_tillage_operation("minimum")))                                # seedbed at sowing
+
+r3 <- run_recipe(new_spacing_scenario("r3_between_crops", list(wheat, maize_after_wheat), soil = soil,
+  latitude = 44.90, longitude = 10.63, start_year = 2020, end_year = 2022,
+  surface_residue = spacing_surface_residue("wheat", mass_kg_ha = 3000, cn_ratio = 80)))
+
+d3 <- spacing_daily(r3$result)
+d3[d3$FertN_kgNha > 0 | d3$OrgN_kgNha > 0 | d3$TillageFincorp > 0 | d3$ResidueRemoved_kgha > 0,
+   c("Clock.Today", "RotationCrop", "FertN_kgNha", "OrgN_kgNha", "TillageFincorp",
+     "ResidueRemoved_kgha", "SurfaceOM_kgha")]
+spacing_crop_summary(r3$result)[, c("Crop", "SowDate", "HarvestDate", "Yield_kgha")]
+```
+
+```{r recipe3-checks}
+cs3 <- spacing_crop_summary(r3$result)
+harvest_w <- as.Date(cs3$HarvestDate[cs3$Crop == "Wheat"])
+sow_m <- as.Date(cs3$SowDate[cs3$Crop == "Maize"])
+removed_day <- days_with(d3, "ResidueRemoved_kgha")
+check("3 Between crops", "about 3000 kg/ha of surface residue on the first day",
+      abs(d3$SurfaceOM_kgha[1] - 3000) < 50, sprintf("%.0f kg/ha", d3$SurfaceOM_kgha[1]))
+before <- d3$SurfaceOM_kgha[which(as_day(d3$Clock.Today) == harvest_w) - 1L]
+removed <- sum(d3$ResidueRemoved_kgha)
+check("3 Between crops", "residue removed once, on the wheat harvest day",
+      identical(removed_day, harvest_w), paste(removed_day, collapse = ", "))
+check("3 Between crops", "removed mass is 70% of the surface residue at harvest",
+      abs(removed / (removed + d3$SurfaceOM_kgha[as_day(d3$Clock.Today) == harvest_w]) - 0.7) < 0.02,
+      sprintf("%.0f kg/ha removed", removed))
+check("3 Between crops", "30 kg N fertiliser 20 days after the wheat harvest",
+      isTRUE(all.equal(d3$FertN_kgNha[as_day(d3$Clock.Today) == harvest_w + 20], 30)))
+check("3 Between crops", "40 kg organic N 30 days after the wheat harvest",
+      isTRUE(all.equal(d3$OrgN_kgNha[as_day(d3$Clock.Today) == harvest_w + 30], 40)))
+check("3 Between crops", "autumn ploughing on 15 Nov after the harvest",
+      d3$TillageFincorp[as_day(d3$Clock.Today) == as.Date(paste0(format(harvest_w, "%Y"), "-11-15"))] > 0)
+check("3 Between crops", "maize sown inside its window by the sowing rule",
+      sow_m >= as.Date("2022-04-01") && sow_m <= as.Date("2022-05-15"), format(sow_m))
+check("3 Between crops", "minimum tillage at maize sowing (50% incorporated)",
+      isTRUE(all.equal(d3$TillageFincorp[as_day(d3$Clock.Today) == sow_m], 0.5)))
+```
+
+# Recipe 4: the standard rotation, repeated
+
+Crops are sown in list order. `cycles` repeats the whole list. The same crop may appear more than once in the list, each time with its own management. The scenario below is the standard rotation of the five-year, Morris and uncertainty workflows (Soybean → winter wheat → maize, 2020-2024), written with rSpacing. Wheat N is applied at stem elongation and flag leaf (stage triggers). Recipe 4 is also the baseline of the companion scenario comparison document.
+
+```{r recipe4-run}
+standard_crops <- list(
+  spacing_crop("Soybean", "Generic_MG1", c("1-may", "15-jun"), 35, 35, 450,
+    tillage = spacing_tillage("no-till"),
+    irrigation = spacing_irrigation(TRUE, .45, .80, 30, "15-jun", "31-aug")),
+  spacing_crop("Wheat", "Claire", c("10-oct", "20-nov"), 180, 35, 180,
+    fertilisation = spacing_fertilisation(30, list(
+      spacing_fertiliser_application(70, trigger = "Stage", stage = "MaximumSpikeletPrimordia"),
+      spacing_fertiliser_application(50, trigger = "Stage", stage = "FlagLeafAppearance"))),
+    irrigation = spacing_irrigation(TRUE, .35, .70, 25, "1-mar", "31-may"),
+    tillage = spacing_tillage("minimum"), organic = spacing_organic_n(20)),
+  spacing_crop("Maize", "B_130", c("1-apr", "10-may"), 7.5, 50, 750,
+    fertilisation = spacing_fertilisation(50, list(
+      spacing_fertiliser_application(100, trigger = "DaysAfterSowing", days_after_sowing = 35),
+      spacing_fertiliser_application(50, trigger = "DaysAfterSowing", days_after_sowing = 60))),
+    irrigation = spacing_irrigation(TRUE, .50, .85, 35, "1-jun", "31-aug"),
+    tillage = spacing_tillage("conventional"), organic = spacing_organic_n(25)))
+
+standard <- new_spacing_scenario("r4_standard_rotation", standard_crops, soil = soil,
+                                 latitude = 44.90, longitude = 10.63,
+                                 start_year = 2020, end_year = 2024, cycles = 2)
+standard                                   # printed summary of the scenario
+r4 <- run_recipe(standard)
+spacing_crop_summary(r4$result)[, c("Crop", "SowDate", "HarvestDate", "Yield_kgha", "EndReason")]
+r4$run$result$yields                       # mean yield by crop (kg/ha)
+```
+
+The request sent to Tool2 can be saved and inspected, or sent with `spacing-tool2 --request` without R:
+
+```{r recipe4-json}
+request_file <- write_spacing_scenario(standard, file.path(OUTPUT_ROOT, "standard_rotation_request.json"),
+                                       overwrite = TRUE)
+substr(paste(readLines(request_file, n = 25), collapse = "\n"), 1, 900)
+```
+
+```{r recipe4-checks}
+cs4 <- spacing_crop_summary(r4$result); cs4 <- cs4[order(as.Date(cs4$SowDate)), ]
+d4 <- spacing_daily(r4$result)
+check("4 Standard rotation", "five crops in the order Soybean, Wheat, Maize, Soybean, Wheat",
+      identical(cs4$Crop, c("Soybean", "Wheat", "Maize", "Soybean", "Wheat")))
+check("4 Standard rotation", "all crops harvested", all(cs4$EndReason == "harvested"))
+check("4 Standard rotation", "wheat harvested in late June or early July",
+      all(format(as.Date(cs4$HarvestDate[cs4$Crop == "Wheat"]), "%m") %in% c("06", "07")))
+sow_w <- as.Date(cs4$SowDate[cs4$Crop == "Wheat"][1])
+msp <- first_day_at_stage(d4, "Wheat", 5, after = sow_w)    # MaximumSpikeletPrimordia
+flg <- first_day_at_stage(d4, "Wheat", 6, after = sow_w)    # FlagLeafAppearance
+check("4 Standard rotation", "70 kg N the day after MaximumSpikeletPrimordia (first wheat)",
+      isTRUE(all.equal(d4$FertN_kgNha[as_day(d4$Clock.Today) == msp + 1], 70)), format(msp + 1))
+check("4 Standard rotation", "50 kg N the day after FlagLeafAppearance (first wheat)",
+      isTRUE(all.equal(d4$FertN_kgNha[as_day(d4$Clock.Today) == flg + 1], 50)), format(flg + 1))
+check("4 Standard rotation", "no fertiliser on soybean",
+      sum(d4$FertN_kgNha[d4$RotationCrop == "Soybean"], na.rm = TRUE) == 0)
+check("4 Standard rotation", "the request JSON lists three crops and two cycles",
+      { j <- jsonlite::fromJSON(request_file, simplifyVector = FALSE); length(j$crops) == 3 && j$cycles == 2 })
+```
+
+# Recipe 5: cover crop
+
+A crop with `termination` is a cover crop. It is ended without harvest on a date, a number of days after sowing, or at a stage, and its biomass stays in the field. It appears in the crop summary with `EndReason = "terminated"` and is left out of the mean yields. Here oats are sown after the wheat harvest and terminated before the maize.
+
+```{r recipe5-run}
+cover <- spacing_crop("Oats", "Drummond", c("1-sep", "30-sep"), 250, 30, 180,
+  tillage = spacing_tillage("no-till"),
+  termination = spacing_termination("Date", date = "15-mar"))
+
+r5 <- run_recipe(new_spacing_scenario("r5_cover_crop",
+  list(standard_crops[[1]], standard_crops[[2]], cover, standard_crops[[3]]),
+  soil = soil, latitude = 44.90, longitude = 10.63, start_year = 2020, end_year = 2022))
+spacing_crop_summary(r5$result)[, c("Crop", "SowDate", "HarvestDate", "Yield_kgha", "EndReason")]
+d5 <- spacing_daily(r5$result)
+ggplot(d5[!is.na(d5$Oats_Biomass_kgha), ], aes(as_day(Clock.Today), Oats_Biomass_kgha)) +
+  geom_line(colour = "darkgreen") + labs(x = NULL, y = "Oats biomass (kg/ha)",
+  title = "Cover crop biomass, left in the field at termination") + theme_minimal()
+```
+
+```{r recipe5-checks}
+cs5 <- spacing_crop_summary(r5$result)
+check("5 Cover crop", "oats terminated on 15 Mar without yield",
+      cs5$EndReason[cs5$Crop == "Oats"] == "terminated" &&
+      as.Date(cs5$HarvestDate[cs5$Crop == "Oats"]) == as.Date("2022-03-15") && cs5$Yield_kgha[cs5$Crop == "Oats"] == 0)
+check("5 Cover crop", "oats left out of the mean yields", !"Oats" %in% names(r5$run$result$yields))
+check("5 Cover crop", "oats grew before termination (biomass > 500 kg/ha)",
+      max(d5$Oats_Biomass_kgha, na.rm = TRUE) > 500, sprintf("%.0f kg/ha", max(d5$Oats_Biomass_kgha, na.rm = TRUE)))
+check("5 Cover crop", "maize sown after the termination",
+      as.Date(cs5$SowDate[cs5$Crop == "Maize"]) > as.Date("2022-03-15"))
+```
+
+# Recipe 6: intercrop
+
+`spacing_intercrop()` sows a second crop together with the main crop of a slot. Both are harvested on the main crop's harvest day, and both yields are in the harvest report. The intercropped crop must be a different APSIM model from the main crop.
+
+```{r recipe6-run}
+soy_maize <- spacing_crop("Soybean", "Generic_MG1", sowing_window = NULL, sowing_date = "10-may",
+  density = 35, depth_mm = 35, row_spacing_mm = 450,
+  intercrop = spacing_intercrop("Maize", "B_130", density = 3.5, depth_mm = 50, row_spacing_mm = 750))
+r6 <- run_recipe(new_spacing_scenario("r6_intercrop", list(soy_maize), soil = soil,
+  latitude = 44.90, longitude = 10.63, start_year = 2021, end_year = 2021))
+spacing_report(r6$result)[, c("Clock.Today", "HarvestedCrop", "Soybean_GrainYield_kgha", "Maize_GrainYield_kgha")]
+```
+
+```{r recipe6-checks}
+rep6 <- spacing_report(r6$result); d6 <- spacing_daily(r6$result)
+check("6 Intercrop", "soybean and maize both sown on 10 May",
+      all(c(d6$Soybean_IsAlive[as_day(d6$Clock.Today) == as.Date("2021-05-11")],
+            d6$Maize_IsAlive[as_day(d6$Clock.Today) == as.Date("2021-05-11")]) == 1))
+check("6 Intercrop", "both yields are reported at harvest",
+      rep6$Soybean_GrainYield_kgha[1] > 0 && rep6$Maize_GrainYield_kgha[1] > 0,
+      sprintf("soybean %.0f, maize %.0f kg/ha", rep6$Soybean_GrainYield_kgha[1], rep6$Maize_GrainYield_kgha[1]))
+check("6 Intercrop", "the same crop twice in one slot is refused in R",
+      inherits(try(spacing_crop("Maize", "B_130", c("1-apr", "10-may"), 7.5, 50, 750,
+        intercrop = spacing_intercrop("Maize", "B_130", 3, 50, 750)), silent = TRUE), "try-error"))
+```
+
+# Recipe 7: perennial crop
+
+`spacing_perennial(years, harvest_date)` keeps a crop in the field for several years, with a harvest of the yield organ every year on `harvest_date`. The crop ends after `years` with `EndReason = "perennial_end"`, and the next crop of the list, if any, is sown. The grapevine yields with mock weather and default parameters are low, and this recipe only shows the mechanics.
+
+```{r recipe7-run}
+vine <- spacing_crop("Grapevine", "SauvignonBlanc", c("1-jul", "31-jul"), 0.4, 300, 2500,
+  tillage = spacing_tillage("no-till"), perennial = spacing_perennial(3, harvest_date = "15-sep"))
+r7 <- run_recipe(new_spacing_scenario("r7_perennial", list(vine), soil = soil,
+  latitude = 44.90, longitude = 10.63, start_year = 2020, end_year = 2023))
+spacing_report(r7$result)[, c("Clock.Today", "HarvestedCrop", "EndReason",
+                              "Grapevine_GrainYield_kgha", "Grapevine_Biomass_kgha")]
+```
+
+```{r recipe7-checks}
+rep7 <- spacing_report(r7$result)
+check("7 Perennial", "three annual harvests on 15 Sep",
+      sum(rep7$EndReason == "harvested") == 3 &&
+      all(format(as_day(rep7$Clock.Today[rep7$EndReason == "harvested"]), "%m-%d") == "09-15"))
+check("7 Perennial", "the crop ends after three years (perennial_end)",
+      tail(rep7$EndReason, 1) == "perennial_end" && as_day(tail(rep7$Clock.Today, 1)) == as.Date("2023-07-01"))
+```
+
+# Recipe 8: your own weather file
+
+Weather comes from Tool2 (mock or the database) unless `weather_file` is given with `mock = FALSE`. The `spacing_met` functions read, change, check and write APSIM `.met` files. Here the mock weather of recipe 2 is made 2 °C warmer, and the maize of recipe 2 is run again with it.
+
+```{r recipe8-run}
+met <- read_spacing_met(r2$run$outputs$weather)
+met
+warm <- set_spacing_met_column(met, "maxt", met$data$maxt + 2, unit = "oC")
+warm <- set_spacing_met_column(warm, "mint", met$data$mint + 2, unit = "oC")
+warm <- set_spacing_met_constant(warm, "tav", met$constants$tav$value + 2, unit = "oC")
+validate_spacing_met(warm)                     # no issues: an empty table
+warm_file <- write_spacing_met(warm, file.path(WORK_ROOT, "mock_2021_plus2C.met"), overwrite = TRUE)
+plot_spacing_met(warm, title = "Mock weather 2021, plus 2 degrees C")
+
+r8 <- run_recipe(new_spacing_scenario("r8_weather_file", list(maize_fixed), soil = soil,
+  latitude = 44.90, longitude = 10.63, start_year = 2021, end_year = 2021,
+  mock = FALSE, weather_file = warm_file))
+rbind(mock = unlist(r2$run$result$yields), plus_2C = unlist(r8$run$result$yields))
+```
+
+```{r recipe8-checks}
+d8 <- spacing_daily(r8$result)
+check("8 Weather file", "Tool2 used the supplied file",
+      normalizePath(r8$run$result$inputs$weather_file, winslash = "/") == normalizePath(warm_file, winslash = "/"))
+check("8 Weather file", "daily maximum temperature is 2 °C higher than in recipe 2",
+      isTRUE(all.equal(mean(d8$Tx) - mean(d2$Tx), 2, tolerance = 1e-3)),
+      sprintf("%+.2f °C", mean(d8$Tx) - mean(d2$Tx)))
+check("8 Weather file", "maize flowered earlier in the warmer year",
+      first_day_at_stage(d8, "Maize", 7) < first_day_at_stage(d2, "Maize", 7))
+```
+
+# Recipe 9: cultivar parameter overrides
+
+`parameter_overrides` changes APSIM cultivar parameters for one crop. Each is an APSIM path without brackets and a value. Tool2 builds a calibrated cultivar on top of the base cultivar. This is the mechanism that the Morris workflow uses. Here maize radiation use efficiency is raised from its default to 2.2 g/MJ.
+
+```{r recipe9-run}
+maize_rue <- spacing_crop("Maize", "B_130", sowing_window = NULL, sowing_date = "20-apr",
+  density = 7.5, depth_mm = 50, row_spacing_mm = 750,
+  fertilisation = maize_fixed$fertilisation, irrigation_schedule = maize_fixed$irrigation_schedule,
+  parameter_overrides = list("Leaf.Photosynthesis.RUE.FixedValue" = 2.2))
+r9 <- run_recipe(new_spacing_scenario("r9_overrides", list(maize_rue), soil = soil,
+  latitude = 44.90, longitude = 10.63, start_year = 2021, end_year = 2021))
+rbind(default_RUE = unlist(r2$run$result$yields), RUE_2.2 = unlist(r9$run$result$yields))
+str(r9$run$result$inputs$fixed_parameter_overrides)
+```
+
+```{r recipe9-checks}
+check("9 Overrides", "the override reached Tool2",
+      grepl("RUE", paste(unlist(r9$run$result$inputs$fixed_parameter_overrides), names(unlist(r9$run$result$inputs$fixed_parameter_overrides)), collapse = " ")))
+check("9 Overrides", "a higher RUE gives more maize biomass",
+      max(spacing_daily(r9$result)$Maize_Biomass_kgha) > max(d2$Maize_Biomass_kgha))
+```
+
+# Recipe 10: mistakes caught early
+
+rSpacing repeats the checks of Tool2, so most mistakes fail in R, before anything runs. A mistake that only Tool2 can see makes the run return status 3 (invalid request) with a message. An example is a cultivar that is missing from the APSIM resource, when the R check is switched off with `verify_cultivar = FALSE`.
+
+```{r recipe10-errors}
+fails <- function(expr) { m <- tryCatch({ force(expr); NA_character_ }, error = function(e) conditionMessage(e)); m }
+mistakes <- data.frame(mistake = c(
+    "unknown cultivar",
+    "unknown stage for a stage trigger",
+    "neither sowing window nor sowing date",
+    "soil with DUL above SAT",
+    "fertiliser Stage trigger without a stage",
+    "residue removal fraction above 1"),
+  message = c(
+    fails(spacing_crop("Wheat", "Hartogg", c("10-oct", "20-nov"), 180, 35, 180)),
+    fails(spacing_crop("Wheat", "Claire", c("10-oct", "20-nov"), 180, 35, 180,
+      fertilisation = spacing_fertilisation(30, list(spacing_fertiliser_application(50, trigger = "Stage", stage = "Flowering"))))),
+    fails(spacing_crop("Maize", "B_130", NULL, 7.5, 50, 750)),
+    fails(spacing_soil_profile(transform(layers, DUL = SAT + 0.01), "bad")),
+    fails(spacing_fertiliser_application(50, trigger = "Stage")),
+    fails(spacing_residue_removal(1.5))), stringsAsFactors = FALSE)
+mistakes$message <- substr(mistakes$message, 1, 140)
+mistakes
+
+r10 <- run_recipe(new_spacing_scenario("r10_tool2_refuses",
+  list(spacing_crop("Wheat", "NotInApsim", c("10-oct", "20-nov"), 180, 35, 180, verify_cultivar = FALSE)),
+  latitude = 44.90, longitude = 10.63, start_year = 2020, end_year = 2021))
+r10$run$status
+tail(strsplit(r10$run$stderr, "\n")[[1]], 1)
+```
+
+```{r recipe10-checks}
+for (i in seq_len(nrow(mistakes)))
+  check("10 Mistakes", paste("refused in R:", mistakes$mistake[i]), !is.na(mistakes$message[i]))
+check("10 Mistakes", "Tool2 refuses a cultivar missing from APSIM with status 3",
+      r10$run$status == 3L && grepl("NotInApsim", r10$run$stderr))
+```
+
+# Reading and plotting results
+
+`read_spacing()` returns a `spacing_result` holding every output table: the CSV exports and the APSIM DataStore. The accessors below are the usual way into it. The standard rotation of recipe 4 is used.
+
+```{r results-read}
+res <- r4$result
+summary(res)                                    # where to look, by group of variables
+inventory_spacing_result(res)[, c("table", "rows", "columns", "empty")]
+head(spacing_report(res)[, c("Clock.Today", "HarvestedCrop", "RotationSlot", "EndReason")])
+spacing_variable_unit(res, "Rain_mm")          # units recorded by APSIM, where available
+describe_spacing_variable(c("SoilCtot_kgCha", "LeachNO3_kgNha", "N2O_total_kgNha"), source = "daily")[
+  , c("variable", "apsim_expression", "unit", "recommended_summary")]
+classify_spacing_variables(c("Rain_mm", "SWmm(1)", "N2O_kgNha(1)", "Maize_LAI"))
+```
+
+```{r results-plots, fig.height=6}
+plot_spacing_yield(res)
+plot_spacing_daily_panel(res, "Maize_LAI", year_summary = "max")
+plot_spacing_fertilisation(res, facet_by_year = FALSE)
+plot_spacing_irrigation(res, facet_by_year = FALSE)
+plot_spacing_soil_carbon(res, type = "change")
+plot_spacing_soil_profile(res, "NO3_kgha", thickness = c(150, 150, 300, 300, 300, 300),
+                          start_date = "2022-01-01", end_date = "2022-12-31")
+plot_spacing_map(list(Gualtieri = res), basemap = FALSE)
+plot_spacing_comparison(list(standard = r4$result, cover_crop = r5$result), variable = "Yield",
+                        by = c("scenario_id", "crop"), statistic = "mean")
+```
+
+```{r results-checks}
+check("Results", "summary() finds the soil carbon and nitrogen loss groups",
+      all(c("soil_carbon", "nitrogen_loss") %in% summary(res)$groups$group))
+check("Results", "units are read from the DataStore", spacing_variable_unit(res, "Rain_mm") == "mm")
+check("Results", "yield plot carries the yield table",
+      nrow(attr(plot_spacing_yield(res), "data")) >= 5)
+```
+
+# Run specifications (for calibration and sensitivity)
+
+A run specification is a data-only record of a run: site, period, soil, cultivars, management and the values of calibrated parameters, each checked against a parameter catalogue. It is written to JSON and read back. Tool2 (up to 0.09.10) reads only its soil (`--run-spec`). The other sections are kept for provenance in R workflows.
+
+```{r run-spec}
+spec_soil <- new_spacing_soil_spec("demo", thickness = c(150, 150, 300),
+  bd = c(1.28, 1.33, 1.39), air_dry = c(.07, .075, .08), ll15 = c(.14, .15, .16),
+  dul = c(.31, .32, .33), sat = c(.46, .45, .44), ks = c(100, 80, 60),
+  carbon = c(1.45, 1.15, .75), soil_cn_ratio = c(12, 12, 12), ph = c(7.2, 7.3, 7.4),
+  no3 = c(18, 12, 8), nh4 = c(2, 1.5, 1))
+catalogue <- spacing_parameter_catalogue(parameter_id = "maize_rue", crop = "Maize",
+  scope = "cultivar", apsim_path = "Leaf.Photosynthesis.RUE.FixedValue", unit = "g/MJ",
+  lower_bound = 1.2, upper_bound = 3.2)
+spec <- new_spacing_run_spec("cookbook-001", 44.90, 10.63, 2021, 2021, soil = spec_soil,
+  rotation = new_spacing_rotation_spec("maize", list(list(Crop = "Maize", Cultivar = "B_130"))),
+  parameter_values = list(maize_rue = 2.2), catalogue = catalogue)
+spec_file <- write_spacing_run_spec(spec, file.path(OUTPUT_ROOT, "cookbook_run_spec.json"), overwrite = TRUE)
+spec_back <- read_spacing_run_spec(spec_file)
+spec_back
+update_spacing_parameters(spec_back, list(maize_rue = 2.5))$ParameterValues
+```
+
+```{r run-spec-checks}
+check("Run specification", "written and read back unchanged",
+      identical(spec_back$ParameterValues, spec$ParameterValues) && identical(spec_back$Soil$DUL, spec$Soil$DUL))
+check("Run specification", "a value outside the catalogue bounds is refused",
+      inherits(try(update_spacing_parameters(spec_back, list(maize_rue = 9)), silent = TRUE), "try-error"))
+```
+
+# Check summary
+
+```{r summary}
+utils::write.csv(CHECKS, file.path(OUTPUT_ROOT, "cookbook_checks.csv"), row.names = FALSE)
+aggregate(passed ~ recipe, CHECKS, function(x) sprintf("%d/%d", sum(x), length(x)))
+CHECKS[!CHECKS$passed, ]
+cat(sprintf("%d of %d checks passed; document time %.1f min.\n", sum(CHECKS$passed), nrow(CHECKS),
+            as.numeric(difftime(Sys.time(), DOCUMENT_STARTED_AT, units = "mins"))))
+if (isTRUE(params$stop_on_failed_check) && !all(CHECKS$passed))
+  stop(sum(!CHECKS$passed), " cookbook check(s) failed: see the table above.")
+```

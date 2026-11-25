@@ -1,0 +1,861 @@
+---
+title: "rSpacing/APSIMx: multivariate Morris sensitivity of all cultivar yields and total biomass, v1.18 workspace edition with parameter preflight and presentation guidance"
+author: "Maurizio Bagnara"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+params:
+  workspace_root: ".."
+  execute_runs: true
+  reuse_completed_runs: false
+  analysis_profile: "smoke"
+  trajectories: 2
+  levels: 4
+  grid_jump: 2
+  seed: 1244
+  output_subdir: "morris_v118_smoke"
+  build_configuration: "Debug"
+  target_framework: "net8.0"
+  show_rows: 30
+---
+
+### Document setup
+
+This block prepares the reporting environment, checks the required R packages and defines common display helpers. `jsonlite` manages the request and result files, `sensitivity` builds and evaluates the Morris design, and `ggplot2` produces the presentation graphics. Optional `DBI` and `RSQLite` support direct inspection of the APSIMx DataStore.
+
+The block does not modify model parameters or execute APSIMx. Its role is reproducibility: if a required package is unavailable, the document stops before any expensive simulations begin.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse=TRUE, comment="#>", warning=FALSE, message=FALSE,
+                      fig.width=10, fig.height=6)
+required_packages <- c("jsonlite", "sensitivity", "ggplot2")
+missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly=TRUE)]
+if (length(missing_packages)) stop("Missing R packages: ", paste(missing_packages, collapse=", "))
+has_rsqlite <- requireNamespace("DBI", quietly=TRUE) && requireNamespace("RSQLite", quietly=TRUE)
+library(ggplot2)
+DOCUMENT_STARTED_AT <- Sys.time()
+show_table <- function(x,n=params$show_rows) {
+ if (is.null(x) || !is.data.frame(x) || !nrow(x)) return(data.frame(note="No data available"))
+ utils::head(x,n)
+}
+empty_plot <- function(label) { plot.new(); text(.5,.5,label) }
+```
+
+# Purpose
+
+Each APSIMx run executes the complete 2020-2024 Soybean-Wheat-Maize rotation (v1.18 standard rotation) and returns yield and total crop biomass for Wheat/Claire, Maize/B_130, and Soybean/Generic_MG1. A **single multivariate target function** standardizes those six responses against one common baseline and combines them into one weighted root-mean-square score.
+
+Before constructing the Morris design, v1.18 tests every candidate parameter independently against a newly executed baseline. Only parameters whose single override completes successfully and returns all six responses enter the Morris factor space. The final run count is therefore `trajectories x (validated factors + 1)`, plus one baseline and one preflight run per candidate parameter. The resulting `mu`, `mu*`, and `sigma` therefore form **one global ranking**, rather than separate rankings by crop or output.
+
+All response components remain stored in the canonical fixture for interpretation. The unified ranking is calculated from the single composite score only.
+
+# Configuration
+
+### What is configured
+
+This block fixes the 2020-2024 experiment, location, mock-weather mode and Morris settings supplied in the YAML header. It verifies the `Spacing.Tool2` project, compiled DLL and `dotnet`, then creates a unique analysis identifier. The short workspace `runs/m114_*` execution path reduces the risk of Windows and SQLite path-length errors.
+
+**How to read this section.** `trajectories`, `levels`, `grid_jump` and `seed` define the Morris design, while years, coordinates, crops and weather mode remain fixed across runs. The fresh-run gate prevents accidental reuse of previous simulation folders.
+
+```{r configuration}
+WORKSPACE_ROOT <- normalizePath(params$workspace_root,winslash="/",mustWork=TRUE)
+RSPACING_ROOT <- normalizePath(file.path(WORKSPACE_ROOT,"rSpacing"),winslash="/",mustWork=TRUE)
+SPACING_ROOT <- normalizePath(file.path(WORKSPACE_ROOT,"apsim"),winslash="/",mustWork=TRUE)
+BUILD_CONFIGURATION <- as.character(params$build_configuration)
+TARGET_FRAMEWORK <- as.character(params$target_framework)
+USE_MOCK_WEATHER <- TRUE
+START_YEAR <- 2020L
+END_YEAR <- 2024L
+LATITUDE <- 44.9000
+LONGITUDE <- 10.6300
+CELL_ID <- "GUA"
+TARGET_CROPS <- c("Wheat","Maize","Soybean")
+normalize_win <- function(path,must_work=FALSE) normalizePath(path,winslash="/",mustWork=must_work)
+spacing_root <- SPACING_ROOT
+project_path <- file.path(spacing_root,"src","Spacing.Tool2","Spacing.Tool2.csproj")
+config_path <- file.path(spacing_root,"spacing.config.json")
+dll_debug <- file.path(spacing_root,"src","Spacing.Tool2","bin","Debug",TARGET_FRAMEWORK,"spacing-tool2.dll")
+dll_release <- file.path(spacing_root,"src","Spacing.Tool2","bin","Release",TARGET_FRAMEWORK,"spacing-tool2.dll")
+dll_candidates <- if (identical(tolower(BUILD_CONFIGURATION),"release")) c(dll_release,dll_debug) else c(dll_debug,dll_release)
+dll_found <- dll_candidates[file.exists(dll_candidates)]
+dll_path <- if(length(dll_found)) normalize_win(dll_found[[1L]],TRUE) else NA_character_
+if (!file.exists(project_path)) stop("Spacing.Tool2 project not found: ",project_path)
+if (!file.exists(config_path)) stop("spacing.config.json not found: ",config_path)
+if (is.na(dll_path)) stop("Spacing.Tool2 DLL not found. Checked: ",paste(dll_candidates,collapse="; "))
+if (!nzchar(Sys.which("dotnet"))) stop("dotnet was not found in the RStudio PATH")
+stopifnot(params$levels >= 2L, params$grid_jump >= 1L, params$grid_jump < params$levels)
+profile <- tolower(as.character(params$analysis_profile))
+if (!profile %in% c("smoke","full","custom")) stop("analysis_profile must be smoke, full, or custom")
+if (profile == "smoke" && as.integer(params$trajectories) != 2L) stop("Smoke profile requires trajectories = 2")
+if (profile == "full" && as.integer(params$trajectories) != 10L) stop("Full profile requires trajectories = 10")
+output_subdir <- as.character(params$output_subdir)
+if (!nzchar(output_subdir) || grepl("/", output_subdir, fixed=TRUE) || grepl("\\", output_subdir, fixed=TRUE)) stop("output_subdir must be one non-empty directory name")
+design_id <- paste0("morris5y_yield_biomass_",START_YEAR,"_",END_YEAR,
+ "_r",params$trajectories,"_p",params$levels,"_j",params$grid_jump,
+ "_s",params$seed,"_v118")
+analysis_root <- file.path(WORKSPACE_ROOT,"results",output_subdir,design_id)
+# A short execution path is retained directly under workspace runs to protect SQLite on Windows.
+execution_root <- file.path(WORKSPACE_ROOT,"runs",paste0("m118_",params$trajectories,"t"))
+log_root <- file.path(WORKSPACE_ROOT,"logs",output_subdir)
+dir.create(analysis_root,recursive=TRUE,showWarnings=FALSE)
+dir.create(log_root,recursive=TRUE,showWarnings=FALSE)
+if (dir.exists(execution_root) && length(list.files(execution_root,all.files=TRUE,no..=TRUE))) stop("Fresh-run requirement failed: v1.18 execution directory already contains files: ",execution_root)
+dir.create(execution_root,recursive=TRUE,showWarnings=FALSE)
+runtime_configuration <- data.frame(
+ field=c("analysis_profile","trajectories","workspace_root","rspacing_root","spacing_root","project_path","config_path","tool2_dll","execution_root","analysis_root","log_root","reuse_completed_runs"),
+ value=c(profile,params$trajectories,WORKSPACE_ROOT,RSPACING_ROOT,SPACING_ROOT,project_path,config_path,dll_path,execution_root,analysis_root,log_root,as.character(params$reuse_completed_runs)),stringsAsFactors=FALSE)
+write.csv(runtime_configuration,file.path(log_root,"runtime_configuration.csv"),row.names=FALSE)
+```
+
+# Execution paths
+
+### How to read the execution paths
+
+The durable analysis directory stores audits, rankings and the canonical fixture. The short execution root contains temporary run folders and APSIMx DataStores. The `characters` column documents path length because deeply nested Windows paths can cause SQLite error 14.
+
+These paths are provenance and reliability information, not scientific results. A presentation can place them in a methods appendix, but they are important for reproducing the analysis.
+
+```{r execution-paths}
+data.frame(path_role=c("Durable analysis and cache","Short APSIMx execution root","Persistent logs"),
+ path=c(analysis_root,execution_root,log_root),characters=nchar(c(analysis_root,execution_root,log_root)),stringsAsFactors=FALSE)
+```
+
+# Parameter catalogue
+
+### What the candidate-parameter catalogue contains
+
+Each row describes one cultivar- or species-specific candidate factor. `role` is a readable functional label; `parameter` is the exact APSIMx override path; `lower` and `upper` define the Morris range; `default_reported` records the nominal value; and `factor` is the unique design name. There are eight candidates for each of Wheat, Maize and Soybean before preflight.
+
+**How to read the ranges.** They define the experimental domain, not confidence intervals and not fitted posterior distributions. A parameter appears in the final Morris ranking only if its isolated override passes the preflight. Parameters rejected by APSIMx remain documented but are excluded from the factor space.
+
+```{r parameter-catalogue}
+parameter_catalogue <- list(
+ # v1.17: standard rotation revised for the Po Valley (Spacing.Tool2 0.09.10): winter wheat Claire
+ # (Hartog is an Australian spring wheat: anthesis late April, harvest index 0.26) and maize B_130
+ # (B_110 matured early August); wheat N at stem elongation (MaximumSpikeletPrimordia) and flag leaf
+ # (FlagLeafAppearance) instead of 100/145 days after sowing; management identical to the five-year
+ # workflow v1.08. default_reported updated to Claire (BasePhyllochron 100; GrainsPerGramOfStem 26 and
+ # MaximumPotentialGrainSize 0.05 are the Wheat model defaults, not set by Claire) and B_130
+ # (Juvenile 250, GrainFilling 900; GrainFilling range widened to 600-1200 to stay centred).
+ # v1.16: default_reported is the value actually used by the base cultivar (cultivar command if the
+ # cultivar sets it, otherwise the APSIM model default), read from the APSIM crop resources.
+ # Since Spacing.Tool2 0.09.06 the perturbed runs keep the base cultivar, so every range must contain it.
+ # Path corrections: Wheat extinction -> Leaf.ExtinctionCoeff.VegetativePhase; Soybean reproductive
+ # phase -> Phenology.LateGrainFilling.Target.EntireGrainfillPeriod (Generic_MG1 = 632).
+ # Maize: FlagLeafToFlowering is set to 1 degree-day by B_130 (range 30-100 never contained it) and is
+ # replaced by FloweringToGrainFilling (B_130 = 170). Soybean Vegetative range re-centred on Generic_MG1 (340).
+ # v1.16-v1.17: specific leaf area (all crops), Maize/Soybean extinction (XY functions) and Wheat
+ # VernSaturation (absent in the CAMP phenology) had no scalar parameter and were rejected by preflight.
+ # v1.18: those six are replaced by scalar parameters that exist in the APSIM crop models, each checked
+ # with a single-override run (all change the simulation except as noted):
+ #   Wheat  phenology_vegetative -> Phenology.CAMP.FLNparams.MinLN (minimum final leaf number; Claire 9;
+ #          7 -> anthesis 9 days earlier, 12 -> 17 days later)
+ #   Wheat  leaf_size            -> Leaf.CohortParameters.MaxArea.AreaLargestLeaves (2600 mm2)
+ #   Maize  root_front_velocity  -> Root...PreFlowering.RootFrontVelocity (25 mm/d)
+ #   Maize  leaf_profile         -> Leaf.CohortParameters.MaxArea.LargestLeafPosition.RelativePositionOfLargestLeaf (0.67)
+ #   Soybean root_front_velocity -> Root...PotentialRootFrontVelocity.early.Function (30 mm/d)
+ #   Soybean stem_partitioning   -> Stem.PotentialGrowth.PartitionFraction.StemGrowthPhase.StemFraction (0.4)
+ # Specific leaf area and light extinction remain fixed: in these models they are interpolation functions.
+ Wheat=data.frame(role=c("rue_biomass","phenology_vegetative","phenology_reproductive","leaf_expansion","grain_number","grain_size","leaf_size","radiation_extinction"),
+  parameter=c("Leaf.Photosynthesis.RUE.FixedValue","Phenology.CAMP.FLNparams.MinLN","Phenology.GrainFilling.Target.FixedValue","Phenology.Phyllochron.BasePhyllochron.FixedValue","Grain.NumberFunction.GrainNumber.GrainsPerGramOfStem.FixedValue","Grain.MaximumPotentialGrainSize.FixedValue","Leaf.CohortParameters.MaxArea.AreaLargestLeaves.FixedValue","Leaf.ExtinctionCoeff.VegetativePhase.FixedValue"),
+  lower=c(.8,7,350,70,15,.03,1800,.35),upper=c(2.5,11,700,140,45,.07,3400,.75),default_reported=c(1.5,9,545,100,26,.05,2600,.5)),
+ Maize=data.frame(role=c("rue_biomass","phenology_vegetative","phenology_reproductive","phenology_flowering","grain_number","grain_size","root_front_velocity","leaf_profile"),
+  parameter=c("Leaf.Photosynthesis.RUE.FixedValue","Phenology.Juvenile.Target.FixedValue","Phenology.GrainFilling.Target.FixedValue","Phenology.FloweringToGrainFilling.Target.FixedValue","Grain.MaximumGrainsPerCob.FixedValue","Grain.MaximumPotentialGrainSize.FixedValue","Root.RootFrontVelocity.PotentialRootFrontVelocity.PreFlowering.RootFrontVelocity.FixedValue","Leaf.CohortParameters.MaxArea.LargestLeafPosition.RelativePositionOfLargestLeaf.FixedValue"),
+  lower=c(1.2,150,600,120,400,.15,15,.55),upper=c(3.2,350,1200,220,900,.45,35,.80),default_reported=c(2,250,900,170,700,.30,25,.67)),
+ Soybean=data.frame(role=c("rue_biomass","phenology_vegetative","phenology_reproductive","leaf_expansion","grain_number","grain_size","root_front_velocity","stem_partitioning"),
+  parameter=c("Leaf.Photosynthesis.RUE.FixedValue","Phenology.Vegetative.Target.FixedValue","Phenology.LateGrainFilling.Target.EntireGrainfillPeriod.FixedValue","Leaf.Phyllochron.FixedValue","Leaf.AreaLargestLeaf.FixedValue","Grain.PotentialHarvestIndex.FixedValue","Root.RootFrontVelocity.PotentialRootFrontVelocity.early.Function.FixedValue","Stem.PotentialGrowth.PartitionFraction.StemGrowthPhase.StemFraction.FixedValue"),
+  lower=c(.5,250,475,30,.003,.30,20,.30),upper=c(1.8,430,790,60,.012,.60,40,.50),default_reported=c(1.2,340,632,45,.006,.50,30,.40))
+)
+for (crop in names(parameter_catalogue)) {
+ parameter_catalogue[[crop]]$factor <- paste0(tolower(crop),"__",parameter_catalogue[[crop]]$role)
+ parameter_catalogue[[crop]]$crop <- crop
+}
+show_table(do.call(rbind,parameter_catalogue),100)
+```
+
+# Five-year scenario
+
+### What the five-year scenario builds
+
+This hidden block recreates the complete Soybean-Generic_MG1 → Wheat-Claire → Maize-B_130 rotation (sown in sequence by Spacing.Tool2 >= 0.09.10; soil parameters, tillage and organic N explicit; wheat N applied at stem elongation and at flag leaf; management identical to the five-year workflow v1.08) with the six-layer demonstration soil and the established management rules. It is the common system used by the baseline, every preflight test and every Morris point. Only validated crop parameters change between Morris runs.
+
+Keeping soil, weather and management fixed is essential for attribution: differences in the target score can then be assigned to the parameter perturbations within the tested domain.
+
+```{r scenario, include=FALSE}
+soil_profile <- list(ProfileId="S1",CellId=CELL_ID,
+ SoilType="Demonstration silt loam",DataSource="Synthetic demo profile; not observed soil data",AreaFraction=1,
+ Layers=list(
+ list(DepthTop=0,DepthBottom=15,Sand=20,Silt=58,Clay=22,DUL=.31,LL15=.14,SAT=.46,SW=.28,OC=1.45,BD=1.28,PH=7.2,NO3=18,NH4=2),
+ list(DepthTop=15,DepthBottom=30,Sand=19,Silt=59,Clay=22,DUL=.32,LL15=.15,SAT=.45,SW=.29,OC=1.15,BD=1.33,PH=7.3,NO3=12,NH4=1.5),
+ list(DepthTop=30,DepthBottom=60,Sand=18,Silt=57,Clay=25,DUL=.33,LL15=.16,SAT=.44,SW=.30,OC=.75,BD=1.39,PH=7.4,NO3=8,NH4=1),
+ list(DepthTop=60,DepthBottom=90,Sand=20,Silt=54,Clay=26,DUL=.32,LL15=.16,SAT=.43,SW=.29,OC=.48,BD=1.43,PH=7.5,NO3=5,NH4=.7),
+ list(DepthTop=90,DepthBottom=120,Sand=22,Silt=52,Clay=26,DUL=.31,LL15=.16,SAT=.42,SW=.28,OC=.32,BD=1.46,PH=7.6,NO3=3.5,NH4=.5),
+ list(DepthTop=120,DepthBottom=150,Sand=24,Silt=50,Clay=26,DUL=.30,LL15=.15,SAT=.41,SW=.27,OC=.24,BD=1.49,PH=7.7,NO3=2.5,NH4=.4)))
+base_crops <- list(
+ list(name="Wheat",management=list(cultivar="Claire",tillage_type="minimum",nitrogen_mineral_kg_ha=30,nitrogen_organic_kg_ha=20,sowing_window_start="10-oct",sowing_window_end="20-nov",sowing_density=180,sowing_depth=35,row_spacing=180,auto_irrigate=TRUE,irrigation_threshold=.35,irrigation_target=.70,max_irrigation_mm=25,irrigation_window_start="1-mar",irrigation_window_end="31-may",split_fertiliser=list(list(trigger="Stage",stage="MaximumSpikeletPrimordia",amount_kg_n_ha=70,fert_type="UreaN"),list(trigger="Stage",stage="FlagLeafAppearance",amount_kg_n_ha=50,fert_type="UreaN")))),
+ list(name="Maize",management=list(cultivar="B_130",tillage_type="conventional",nitrogen_mineral_kg_ha=50,nitrogen_organic_kg_ha=25,sowing_window_start="1-apr",sowing_window_end="10-may",sowing_density=7.5,sowing_depth=50,row_spacing=750,auto_irrigate=TRUE,irrigation_threshold=.50,irrigation_target=.85,max_irrigation_mm=35,irrigation_window_start="1-jun",irrigation_window_end="31-aug",split_fertiliser=list(list(trigger="DaysAfterSowing",days_after_sowing=35L,amount_kg_n_ha=100,fert_type="UreaN"),list(trigger="DaysAfterSowing",days_after_sowing=60L,amount_kg_n_ha=50,fert_type="UreaN")))),
+ list(name="Soybean",management=list(cultivar="Generic_MG1",tillage_type="no-till",nitrogen_mineral_kg_ha=0,nitrogen_organic_kg_ha=0,sowing_window_start="1-may",sowing_window_end="15-jun",sowing_density=35,sowing_depth=35,row_spacing=450,auto_irrigate=TRUE,irrigation_threshold=.45,irrigation_target=.80,max_irrigation_mm=30,irrigation_window_start="15-jun",irrigation_window_end="31-aug")))
+
+# ---- Tool2 >= 0.09.07: explicit soil parameters ----------------------------------------
+# Spacing.Tool2 <= 0.09.06 replaced these parameters with constants inside the C# code.
+# From 0.09.07 every soil parameter is read from the request; the values below are the
+# former constants, written explicitly so that they are visible, traceable and perturbable.
+# Replace them with measured or pedotransfer values for a real site.
+`%||%` <- function(a, b) if (is.null(a)) b else a
+complete_soil_profile <- function(sp, crop_names) {
+  n <- length(sp$Layers)
+  for (i in seq_len(n)) {
+    L <- sp$Layers[[i]]
+    L$AirDry      <- L$AirDry %||% (0.5 * L$LL15)
+    L$SWCON       <- L$SWCON %||% 0.3
+    L$SoilCNRatio <- L$SoilCNRatio %||% 12.5
+    L$FBiom       <- L$FBiom %||% (if (L$DepthTop < 15) 0.05 else if (L$DepthTop < 30) 0.02 else 0.01)
+    L$FInert      <- L$FInert %||% (if (L$DepthTop < 15) 0.45 else if (L$DepthTop < 30) 0.60 else 0.90)
+    L$FOM         <- L$FOM %||% (260 * exp(-0.02 * (i - 1) * (L$DepthBottom - L$DepthTop)))
+    L$Urea        <- L$Urea %||% 0
+    sp$Layers[[i]] <- L
+  }
+  kl <- 0.07 - (seq_len(n) - 1) / max(n - 1, 1) * 0.03
+  ll15 <- vapply(sp$Layers, function(z) z$LL15, numeric(1))
+  sp$CropParameters <- stats::setNames(lapply(crop_names, function(cn)
+    list(LL = ll15, KL = kl, XF = rep(1, n))), crop_names)
+  sp$Water <- list(SummerDate = "1-Jun", SummerU = 6, SummerCona = 3.5, WinterDate = "1-Oct",
+                   WinterU = 2, WinterCona = 2.5, DiffusConst = 40, DiffusSlope = 16, Salb = 0.13,
+                   CN2Bare = 73, CNRed = 20, CNCov = 0.8, FOMCNRatio = 50)
+  # Initial NO3/NH4/Urea are kg N/ha per layer (Tool2 InitialNUnits = "kgha")
+  sp$InitialNUnits <- "kgha"
+  sp
+}
+# Agronomic representation of tillage and organic N (Tool2 >= 0.09.07, AgronomicAssumptions).
+# Tillage is applied on the sowing day, after any organic input and before sowing.
+TILLAGE_ASSUMPTIONS <- list(
+  "conventional" = list(tillage_incorporation_fraction = 0.90, tillage_depth_mm = 250, tillage_cn_reduction = 20, tillage_cn_rain = 100),
+  "minimum"      = list(tillage_incorporation_fraction = 0.50, tillage_depth_mm = 120, tillage_cn_reduction = 10, tillage_cn_rain = 75),
+  "no-till"      = list(tillage_incorporation_fraction = 0.00, tillage_depth_mm = 0,   tillage_cn_reduction = 0,  tillage_cn_rain = 0))
+ORGANIC_ASSUMPTIONS <- list(organic_residue_type = "manure", organic_cn_ratio = 15)  # cattle FYM, 8 % C on applied mass
+complete_management <- function(m) {
+  for (k in names(TILLAGE_ASSUMPTIONS[[m$tillage_type]])) m[[k]] <- m[[k]] %||% TILLAGE_ASSUMPTIONS[[m$tillage_type]][[k]]
+  if (isTRUE(m$nitrogen_organic_kg_ha > 0)) for (k in names(ORGANIC_ASSUMPTIONS)) m[[k]] <- m[[k]] %||% ORGANIC_ASSUMPTIONS[[k]]
+  m
+}
+CROP_ORDER <- c("Soybean", "Wheat", "Maize")   # rotation sequence sent to Spacing.Tool2
+
+base_crops <- base_crops[match(CROP_ORDER, vapply(base_crops, function(z) z$name, character(1)))]
+for (i in seq_along(base_crops)) base_crops[[i]]$management <- complete_management(base_crops[[i]]$management)
+soil_profile <- complete_soil_profile(soil_profile, CROP_ORDER)
+```
+
+### How to read the scenario summary
+
+The table confirms the three crops and cultivars, simulation period and mock-weather setting. It is a compact identity check for the experiment. Every row should show the same start and end years because the three crops belong to one five-year rotation, not three independent simulations.
+
+This summary does not show annual crop order or outcomes. It verifies the model configuration used for sensitivity analysis.
+
+```{r scenario-summary}
+data.frame(crop=vapply(base_crops,function(z) z$name,character(1)),
+ cultivar=vapply(base_crops,function(z) z$management$cultivar,character(1)),
+ start_year=START_YEAR,end_year=END_YEAR,mock_weather=USE_MOCK_WEATHER)
+```
+
+# Output readers and canonical target extraction
+
+### Which responses enter the analysis
+
+The output contract distinguishes yield from total crop biomass and states how missing values are treated. Yield is read from `result$yields`; after a successful model run, absence of harvested yield is represented as zero. Biomass must be found in an explicit crop-specific APSIMx output; if it is unavailable, the response vector is incomplete.
+
+This asymmetry is deliberate. No harvest can be a valid biological outcome, whereas missing biomass evidence cannot safely be interpreted as zero.
+
+```{r output-contract}
+data.frame(response=c("Yield","Total crop biomass"),
+ source=c("result$yields[[crop]]","APSIMx crop-summary, harvest, time-series or SQLite output"),
+ missing_value_policy=c("Zero only after a successful run with no harvested yield","Run marked incomplete"),stringsAsFactors=FALSE)
+```
+
+### How outputs are found and validated
+
+These hidden functions read CSV and SQLite outputs, standardise dates and numeric values, and extract the six required responses. Biomass selection is strict: Wheat, Maize and Soybean must use `Wheat_Biomass_kgha`, `Maize_Biomass_kgha` and `Soybean_Biomass_kgha`, respectively. Preferred sources are `control` and `sqlite__Report`, with daily tables only as fallbacks.
+
+The strict crop-variable match prevents one generic or first-found biomass column from being copied to all three crops. The baseline records the selected table and column so subsequent runs use exactly the same evidence definition.
+
+```{r output-functions, include=FALSE}
+read_csv_if_present <- function(path) {
+ if (is.null(path) || !length(path) || is.na(path) || !nzchar(path) || !file.exists(path)) return(NULL)
+ utils::read.csv(path,stringsAsFactors=FALSE,check.names=FALSE)
+}
+read_all_tables <- function(result) {
+ tr <- result$tradeoffs
+ tables <- list(
+  control=read_csv_if_present(tr$control_csv_path),daily=read_csv_if_present(tr$daily_csv_path),
+  crop_summary=read_csv_if_present(tr$crop_summary_path),timeseries=read_csv_if_present(tr$timeseries_csv),
+  harvest=read_csv_if_present(tr$harvest_csv))
+ if (has_rsqlite && !is.null(tr$datastore_path) && file.exists(tr$datastore_path)) {
+  con <- DBI::dbConnect(RSQLite::SQLite(),tr$datastore_path); on.exit(DBI::dbDisconnect(con),add=TRUE)
+  for (nm in DBI::dbListTables(con)) {
+   q <- tryCatch(DBI::dbReadTable(con,nm),error=function(e) NULL)
+   if (is.data.frame(q) && nrow(q)) tables[[paste0("sqlite__",nm)]] <- q
+  }
+ }
+ Filter(function(z) is.data.frame(z) && nrow(z),tables)
+}
+first_col <- function(d,exact=character(),regex=character(),numeric=FALSE) {
+ hit <- exact[exact %in% names(d)]
+ if (!length(hit) && length(regex)) hit <- unique(unlist(lapply(regex,function(x) grep(x,names(d),value=TRUE,ignore.case=TRUE))))
+ if (numeric && length(hit)) hit <- hit[vapply(d[hit],is.numeric,logical(1))]
+ if (length(hit)) hit[[1L]] else NA_character_
+}
+safe_date <- function(x) {
+ if (inherits(x,"Date")) return(x)
+ if (inherits(x,c("POSIXct","POSIXlt"))) return(as.Date(x))
+ x <- trimws(as.character(x)); out <- rep(as.Date(NA),length(x))
+ formats <- c("%Y-%m-%d","%Y-%m-%d %H:%M:%S","%Y-%m-%dT%H:%M:%S",
+              "%Y-%m-%dT%H:%M:%SZ","%d/%m/%Y","%m/%d/%Y",
+              "%d-%m-%Y","%d-%b-%Y","%d %b %Y","%Y/%m/%d")
+ for (fmt in formats) {
+  miss <- is.na(out) & !is.na(x) & nzchar(x)
+  if (!any(miss)) break
+  out[miss] <- suppressWarnings(as.Date(x[miss],format=fmt))
+ }
+ miss <- is.na(out) & grepl("^[0-9]{4}-[0-9]{2}-[0-9]{2}",x)
+ if(any(miss)) out[miss] <- suppressWarnings(as.Date(substr(x[miss],1L,10L),format="%Y-%m-%d"))
+ out
+}
+safe_year <- function(d) {
+ yc <- first_col(d,c("Year","year"),c("^year$"))
+ if (!is.na(yc)) {
+  y <- suppressWarnings(as.integer(as.character(d[[yc]])))
+  if(any(is.finite(y))) return(y)
+ }
+ dc <- first_col(d,c("Date","date","Clock.Today","Today"),c("date","today"))
+ if (!is.na(dc)) return(suppressWarnings(as.integer(format(safe_date(d[[dc]]),"%Y"))))
+ doy <- first_col(d,c("DOY","doy","Day","day"),c("^doy$"))
+ if(!is.na(yc) && !is.na(doy)) {
+  dates <- suppressWarnings(as.Date(paste(d[[yc]],d[[doy]]),format="%Y %j"))
+  return(suppressWarnings(as.integer(format(dates,"%Y"))))
+ }
+ rep(NA_integer_,nrow(d))
+}
+numeric_like <- function(x) {
+ if (is.numeric(x)) return(as.numeric(x))
+ suppressWarnings(as.numeric(gsub(",",".",trimws(as.character(x)),fixed=TRUE)))
+}
+biomass_candidates <- function(tables,crop) {
+ expected <- paste0(crop,"_Biomass_kgha")
+ preferred_tables <- c("control","sqlite__Report","daily","sqlite__DailyReport")
+ out <- list(); k <- 0L
+ for(tn in intersect(preferred_tables,names(tables))) {
+  d <- tables[[tn]]
+  if(!expected %in% names(d)) next
+  val <- numeric_like(d[[expected]]); keep <- is.finite(val)
+  if(!any(keep)) next
+  k <- k+1L
+  out[[k]] <- data.frame(evidence_table=tn,variable=expected,crop=crop,n=sum(keep),
+    final_value=tail(val[keep],1L),maximum_value=max(val[keep],na.rm=TRUE),
+    source_priority=match(tn,preferred_tables),stringsAsFactors=FALSE)
+ }
+ if(length(out)) do.call(rbind,out) else data.frame()
+}
+choose_biomass_source <- function(candidates,crop) {
+ expected <- paste0(crop,"_Biomass_kgha")
+ if(is.null(candidates)||!nrow(candidates)) return(NULL)
+ z <- candidates[candidates$crop==crop & candidates$variable==expected & is.finite(candidates$final_value),,drop=FALSE]
+ if(!nrow(z)) return(NULL)
+ z <- z[order(z$source_priority),,drop=FALSE]
+ as.list(z[1L,c("evidence_table","variable","crop")])
+}
+validate_biomass_sources <- function(sources) {
+ expected <- stats::setNames(paste0(TARGET_CROPS,"_Biomass_kgha"),TARGET_CROPS)
+ if(is.null(sources)||!all(TARGET_CROPS %in% names(sources))) return(list(ok=FALSE,reason="One or more crop-specific biomass sources are absent"))
+ variables <- vapply(TARGET_CROPS,function(crop) scalar_chr(sources[[crop]]$variable,""),character(1))
+ crops <- vapply(TARGET_CROPS,function(crop) scalar_chr(sources[[crop]]$crop,""),character(1))
+ if(!identical(unname(variables),unname(expected))) return(list(ok=FALSE,reason=paste("Wrong biomass variables:",paste(variables,collapse=", "))))
+ if(!identical(unname(crops),TARGET_CROPS)) return(list(ok=FALSE,reason="Biomass source crop labels are inconsistent"))
+ if(anyDuplicated(paste(vapply(sources,`[[`,character(1),"evidence_table"),variables,sep="::"))) return(list(ok=FALSE,reason="Duplicate biomass sources were selected"))
+ list(ok=TRUE,reason="")
+}
+extract_biomass_locked <- function(tables,source) {
+ if(is.null(source)||!source$evidence_table %in% names(tables)) return(list(available=FALSE,value=NA_real_,reason="Locked biomass table is missing"))
+ d <- tables[[source$evidence_table]]
+ if(!source$variable %in% names(d)) return(list(available=FALSE,value=NA_real_,reason="Locked crop-specific biomass variable is missing"))
+ if(!identical(source$variable,paste0(source$crop,"_Biomass_kgha"))) return(list(available=FALSE,value=NA_real_,reason="Locked biomass variable does not match its crop"))
+ val <- numeric_like(d[[source$variable]])
+ # v1.15: Spacing.Tool2 >= 0.09.06 writes one harvest row per harvested crop (column HarvestedCrop).
+ # Biomass is the mean over this crop's own harvests, consistent with the yield in result.json.
+ # Older outputs without HarvestedCrop keep the v1.14 rule (last finite value).
+ if("HarvestedCrop" %in% names(d)) {
+  val <- val[as.character(d$HarvestedCrop)==source$crop]; val <- val[is.finite(val)]
+  if(!length(val)) return(list(available=FALSE,value=NA_real_,reason=paste("No harvest of",source$crop,"in the simulated period")))
+  return(list(available=TRUE,value=mean(val),reason=NA_character_))
+ }
+ val <- val[is.finite(val)]
+ if(!length(val)) return(list(available=FALSE,value=NA_real_,reason="Locked biomass variable has no finite values"))
+ list(available=TRUE,value=tail(val,1L),reason=NA_character_)
+}
+output_column_inventory <- function(tables) {
+ if(!length(tables)) return(data.frame(note="No APSIMx output tables were available to the Rmd"))
+ do.call(rbind,lapply(names(tables),function(nm) data.frame(table=nm,column=names(tables[[nm]]),class=vapply(tables[[nm]],function(x)paste(class(x),collapse="/"),character(1)),stringsAsFactors=FALSE)))
+}
+extract_yield <- function(result,crop) {
+ y <- result$yields
+ if (is.null(y) || is.null(y[[crop]])) {
+  if (isTRUE(result$success)) return(list(value=0,available=TRUE,reason="Successful APSIMx run with no harvested yield; yield set to zero"))
+  return(list(value=NA_real_,available=FALSE,reason="Yield unavailable"))
+ }
+ value <- suppressWarnings(as.numeric(y[[crop]]))
+ list(value=if(length(value)) value[[1L]] else NA_real_,available=length(value) && is.finite(value[[1L]]),reason=NA_character_)
+}
+```
+
+# Canonical scalar handling
+
+### How missing scalar values are represented
+
+This table documents the internal data contract. Yield and biomass are numeric scalars, exit status is an integer scalar, and unavailable fields use typed `NA` values. Typed missing values prevent length-zero objects, text values or implicit coercion from corrupting the run table.
+
+The table is technical quality assurance. `NA` means unavailable; it must not be interpreted as zero biological response.
+
+```{r scalar-policy}
+data.frame(field=c("yield","total_biomass","exit_status"),type=c("numeric scalar","numeric scalar","integer scalar"),absent_value=c("NA_real_","NA_real_","NA_integer_"),stringsAsFactors=FALSE)
+```
+
+### Why scalar helper functions are used
+
+These hidden helpers convert model fields into one numeric, character or logical value and provide a controlled fallback when the field is absent. They ensure that every run contributes one structurally consistent row to the audit tables, even when APSIMx fails.
+
+This block does not change valid model results. It prevents reporting code from failing before the underlying simulation error can be diagnosed.
+
+```{r safe-scalars, include=FALSE}
+scalar_num <- function(x, default=NA_real_) {
+ if(is.null(x) || !length(x)) return(default)
+ z <- suppressWarnings(as.numeric(x[[1L]]))
+ if(length(z) && is.finite(z)) z else default
+}
+scalar_chr <- function(x, default=NA_character_) {
+ if(is.null(x) || !length(x)) return(default)
+ z <- as.character(x[[1L]])
+ if(length(z) && !is.na(z) && nzchar(z)) z else default
+}
+scalar_lgl <- function(x, default=FALSE) {
+ if(is.null(x) || !length(x) || is.na(x[[1L]])) return(default)
+ isTRUE(x[[1L]])
+}
+```
+
+# Unified multivariate target function
+
+The target function retains the weighted RMS formulation and combines yield and total biomass for all three crops after baseline normalization.
+
+### How the unified target is calculated
+
+For each crop, yield and total biomass are expressed as proportional deviations from the common baseline. The six normalised deviations are combined using an equally weighted root-mean-square score. A score of zero therefore means that all six responses equal the baseline; larger positive scores mean a larger joint departure, regardless of direction.
+
+**How to interpret the score.** Because deviations are squared, increases and decreases both raise the score. The target measures overall magnitude of response, not agronomic desirability. Equal weights give each of the six components the same formal contribution. The global Morris ranking therefore answers which parameters most alter the combined yield-biomass system, not whether they increase yield.
+
+```{r multivariate-target-function}
+response_names <- c("yield_wheat","yield_maize","yield_soybean","biomass_wheat","biomass_maize","biomass_soybean")
+response_weights <- stats::setNames(rep(1,length(response_names)),response_names)
+normalize_response_component <- function(value,baseline_value,scale_value) {
+ if(!is.finite(value)||!is.finite(baseline_value)||!is.finite(scale_value)||scale_value<=0) return(NA_real_)
+ (value-baseline_value)/scale_value
+}
+multivariate_target <- function(run,baseline,weights=response_weights) {
+ response <- c(yield_wheat=scalar_num(run$yield_wheat),yield_maize=scalar_num(run$yield_maize),yield_soybean=scalar_num(run$yield_soybean),biomass_wheat=scalar_num(run$biomass_wheat),biomass_maize=scalar_num(run$biomass_maize),biomass_soybean=scalar_num(run$biomass_soybean))
+ base <- c(yield_wheat=scalar_num(baseline$yield_wheat),yield_maize=scalar_num(baseline$yield_maize),yield_soybean=scalar_num(baseline$yield_soybean),biomass_wheat=scalar_num(baseline$biomass_wheat),biomass_maize=scalar_num(baseline$biomass_maize),biomass_soybean=scalar_num(baseline$biomass_soybean))
+ scales <- pmax(abs(base),1)
+ normalized <- mapply(normalize_response_component,response,base,scales); names(normalized)<-names(response)
+ if(any(!is.finite(normalized))) return(list(score=NA_real_,response=response,normalized=normalized,scales=scales,available=FALSE,reason="At least one yield or biomass response is unavailable"))
+ weights<-weights[names(normalized)]
+ list(score=as.numeric(sqrt(sum(weights*normalized^2)/sum(weights))),response=response,normalized=normalized,scales=scales,available=TRUE,reason=NA_character_)
+}
+```
+
+# APSIMx runner
+
+### Planned executions
+
+The table reports the execution and analysis roots, confirms that previous-result reuse is disabled, and lists candidate factors, preflight runs and the single baseline. The final number of Morris runs is calculated only after preflight because rejected parameters are removed from the design.
+
+Use this table to explain computational cost. Each APSIMx run returns all six responses, so separate simulations are not required for yield and biomass.
+
+```{r runner-settings}
+all_parameter_spec <- do.call(rbind,parameter_catalogue); rownames(all_parameter_spec) <- NULL
+candidate_preflight_runs <- nrow(all_parameter_spec)
+data.frame(setting=c("Analysis profile","Trajectories","Execution root","Analysis root","Log root","Previous-result reuse","Mock weather","Candidate factors","Preflight runs","Baseline runs"),
+ value=c(profile,params$trajectories,execution_root,analysis_root,log_root,"Disabled in v1.18",as.character(USE_MOCK_WEATHER),nrow(all_parameter_spec),candidate_preflight_runs,1L),stringsAsFactors=FALSE)
+```
+
+### What the APSIMx runner does
+
+For each baseline, preflight or Morris point, the runner creates an isolated folder, writes request and configuration JSON files, applies crop-specific overrides, starts `Spacing.Tool2` through `dotnet`, and reads the resulting JSON, CSV and SQLite evidence. It records exit status, logs, runtime and all six responses.
+
+The cache files written here are run records within the current version, not a mechanism for reusing older analyses. Failures are returned as structured rows so that the report can show the exact reason instead of stopping with a length or merge error.
+
+```{r runner, include=FALSE}
+make_overrides_by_crop <- function(design_row,spec) {
+ values <- as.numeric(design_row[spec$factor]); by_crop <- split(seq_len(nrow(spec)),spec$crop)
+ lapply(by_crop,function(idx) stats::setNames(as.list(values[idx]),spec$parameter[idx]))
+}
+single_parameter_override <- function(spec_row,value) {
+ out <- list(); out[[as.character(spec_row$crop)]] <- stats::setNames(list(as.numeric(value)),as.character(spec_row$parameter)); out
+}
+run_apsim_multivariate <- function(run_index,overrides_by_crop=NULL,run_kind="morris",biomass_sources=NULL) {
+ run_code <- switch(run_kind,baseline="b",preflight=sprintf("p%03d",run_index),sprintf("r%03d",run_index))
+ run_id <- paste0("a",run_code); run_dir <- file.path(execution_root,run_id); output_dir <- file.path(run_dir,"o"); weather_dir <- file.path(run_dir,"w")
+ cache_dir <- file.path(analysis_root,"all_cultivars","cache"); dir.create(output_dir,recursive=TRUE,showWarnings=FALSE); dir.create(weather_dir,recursive=TRUE,showWarnings=FALSE); dir.create(cache_dir,recursive=TRUE,showWarnings=FALSE)
+ request_path <- file.path(run_dir,"q.json"); config_path <- file.path(run_dir,"c.json"); result_path <- file.path(output_dir,"r.json"); manifest_path <- file.path(output_dir,"m.json"); stdout_path <- file.path(output_dir,"out.log"); stderr_path <- file.path(output_dir,"err.log")
+ cache_path <- file.path(cache_dir,paste0(run_code,"_v118.rds"))
+ crops <- base_crops
+ if(!is.null(overrides_by_crop)) for(i in seq_along(crops)) { crop_name<-crops[[i]]$name; if(!is.null(overrides_by_crop[[crop_name]])) crops[[i]]$parameter_overrides<-overrides_by_crop[[crop_name]] }
+ request <- list(id="m5all",name="M5all",run_id=run_id,metadata=list(source="R Markdown",method="Morris multivariate target",design_id=design_id,run_kind=run_kind,run_index=as.character(run_index),target_crops=paste(TARGET_CROPS,collapse=",")),mock=isTRUE(USE_MOCK_WEATHER),calibrate=FALSE,lat=LATITUDE,lon=LONGITUDE,cell_id=CELL_ID,start_year=START_YEAR,end_year=END_YEAR,soil_profile=soil_profile,result_file=normalize_win(result_path,FALSE),manifest_file=normalize_win(manifest_path,FALSE),crops=crops,cycles=5L)
+ config <- list(DbApiBaseUrl="http://localhost:8000/api/v1",DbApiKey="",TempWeatherDir=normalize_win(weather_dir,FALSE),OutputDir=normalize_win(output_dir,FALSE),StartYear=START_YEAR,EndYear=END_YEAR,MaxParallelism=1L)
+ jsonlite::write_json(request,request_path,auto_unbox=TRUE,pretty=TRUE,digits=NA,null="null"); jsonlite::write_json(config,config_path,auto_unbox=TRUE,pretty=TRUE,digits=NA,null="null")
+ args <- c(shQuote(normalize_win(dll_path,TRUE)),"--config",shQuote(normalize_win(config_path,TRUE)),"--request",shQuote(normalize_win(request_path,TRUE)),"--result",shQuote(normalize_win(result_path,FALSE)),"--manifest",shQuote(normalize_win(manifest_path,FALSE))); if(USE_MOCK_WEATHER) args<-c(args,"--mock")
+ started<-Sys.time(); exit_status<-system2("dotnet",args=args,stdout=stdout_path,stderr=stderr_path,wait=TRUE); elapsed<-as.numeric(difftime(Sys.time(),started,units="secs"))
+ stderr_text<-if(file.exists(stderr_path)) paste(readLines(stderr_path,warn=FALSE),collapse="
+") else ""
+ stdout_text<-if(file.exists(stdout_path)) paste(readLines(stdout_path,warn=FALSE),collapse="
+") else ""
+ result<-if(identical(as.integer(exit_status),0L)&&file.exists(result_path)) tryCatch(jsonlite::read_json(result_path,simplifyVector=TRUE),error=function(e) NULL) else NULL
+ model_success<-!is.null(result)&&isTRUE(result$success)
+ if(!model_success) {
+  reason<-if(nzchar(stderr_text)) stderr_text else if(nzchar(stdout_text)) stdout_text else paste("Spacing.Tool2 exit code",exit_status)
+  out<-list(schema_version="1.18",model_success=FALSE,yield_wheat=NA_real_,yield_maize=NA_real_,yield_soybean=NA_real_,biomass_wheat=NA_real_,biomass_maize=NA_real_,biomass_soybean=NA_real_,biomass_sources=biomass_sources,run_index=run_index,run_kind=run_kind,run_id=run_id,reason=reason,exit_status=as.integer(exit_status),stderr_path=stderr_path,stdout_path=stdout_path,result_path=result_path,elapsed_seconds=elapsed)
+  saveRDS(out,cache_path); return(out)
+ }
+ tables<-read_all_tables(result); yields<-stats::setNames(lapply(TARGET_CROPS,function(crop) extract_yield(result,crop)),TARGET_CROPS)
+ candidate_rows<-if(run_kind=="baseline") do.call(rbind,lapply(TARGET_CROPS,function(crop) biomass_candidates(tables,crop))) else data.frame()
+ locked<-biomass_sources; if(run_kind=="baseline"&&is.null(locked)) locked<-stats::setNames(lapply(TARGET_CROPS,function(crop) choose_biomass_source(biomass_candidates(tables,crop),crop)),TARGET_CROPS)
+ bb<-stats::setNames(lapply(TARGET_CROPS,function(crop) extract_biomass_locked(tables,locked[[crop]])),TARGET_CROPS)
+ out<-list(schema_version="1.18",model_success=TRUE,yield_wheat=scalar_num(yields$Wheat$value),yield_maize=scalar_num(yields$Maize$value),yield_soybean=scalar_num(yields$Soybean$value),biomass_wheat=scalar_num(bb$Wheat$value),biomass_maize=scalar_num(bb$Maize$value),biomass_soybean=scalar_num(bb$Soybean$value),biomass_sources=locked,biomass_candidates=candidate_rows,output_inventory=if(run_kind=="baseline") output_column_inventory(tables) else data.frame(),run_index=run_index,run_kind=run_kind,run_id=run_id,reason=if(all(vapply(bb,function(z)isTRUE(z$available),logical(1)))) "" else paste(vapply(bb,function(z)scalar_chr(z$reason,"Biomass unavailable"),character(1)),collapse="; "),exit_status=as.integer(exit_status),stderr_path=stderr_path,stdout_path=stdout_path,result_path=result_path,elapsed_seconds=elapsed)
+ saveRDS(out,cache_path); out
+}
+```
+
+# Baseline gate
+
+### Why the baseline gate is mandatory
+
+The baseline is a fresh, unperturbed five-year run. The gate checks model success, three finite yields, three finite crop-specific biomasses and a valid target definition. It also writes the biomass candidates, selected sources and complete column inventory.
+
+Morris preflight begins only if the gate succeeds. This prevents hundreds of parameter runs from being launched when the base scenario or output extraction is invalid.
+
+```{r baseline-gate, include=FALSE, eval=params$execute_runs}
+baseline <- run_apsim_multivariate(0L,NULL,"baseline",NULL); baseline_target <- multivariate_target(baseline,baseline)
+baseline_diagnostics <- data.frame(model_success=isTRUE(baseline$model_success),yield_wheat=scalar_num(baseline$yield_wheat),yield_maize=scalar_num(baseline$yield_maize),yield_soybean=scalar_num(baseline$yield_soybean),biomass_wheat=scalar_num(baseline$biomass_wheat),biomass_maize=scalar_num(baseline$biomass_maize),biomass_soybean=scalar_num(baseline$biomass_soybean),target_available=isTRUE(baseline_target$available),reason=scalar_chr(baseline$reason,""),stringsAsFactors=FALSE)
+biomass_candidate_rows<-baseline$biomass_candidates; if(is.null(biomass_candidate_rows)||!is.data.frame(biomass_candidate_rows)||!nrow(biomass_candidate_rows)) biomass_candidate_rows<-data.frame(note="No total-biomass candidates found")
+biomass_source_gate <- validate_biomass_sources(baseline$biomass_sources)
+source_rows <- do.call(rbind,lapply(TARGET_CROPS,function(crop) data.frame(crop=crop,evidence_table=scalar_chr(baseline$biomass_sources[[crop]]$evidence_table,""),variable=scalar_chr(baseline$biomass_sources[[crop]]$variable,""),stringsAsFactors=FALSE)))
+write.csv(baseline_diagnostics,file.path(analysis_root,"baseline_diagnostics.csv"),row.names=FALSE); write.csv(biomass_candidate_rows,file.path(analysis_root,"baseline_biomass_candidates.csv"),row.names=FALSE); write.csv(source_rows,file.path(analysis_root,"baseline_locked_biomass_sources.csv"),row.names=FALSE); write.csv(baseline$output_inventory,file.path(analysis_root,"baseline_output_column_inventory.csv"),row.names=FALSE)
+if(!isTRUE(baseline$model_success)||!isTRUE(baseline_target$available)||!isTRUE(biomass_source_gate$ok)) stop("Unified baseline gate failed: ",scalar_chr(biomass_source_gate$reason,scalar_chr(baseline$reason,"unknown reason")),". Morris preflight was not started.")
+```
+
+## Unified baseline responses
+
+### How to read the unified baseline responses
+
+This row shows the six reference responses used for normalisation. `model_success` and `target_available` must both be `TRUE`, and `reason` should be empty. Yield and biomass values retain their APSIMx units, normally kg/ha in the configured reports.
+
+These values are denominators for relative deviations, so unusually small or zero baselines would make the composite score unstable. They are reference outputs, not Morris indices.
+
+```{r baseline-results}
+show_table(baseline_diagnostics,100)
+```
+
+## Locked total-biomass sources
+
+### How to read the locked biomass sources
+
+The table must pair each crop with its exact biomass variable and evidence table. Wheat, Maize and Soybean should point to their own `_Biomass_kgha` columns, with no duplicated table-variable combination across crops.
+
+This is a critical audit table. If the same variable appears for all crops, the multivariate target is scientifically invalid even if all model runs succeed.
+
+```{r baseline-biomass-source}
+show_table(source_rows,20)
+```
+
+# Parameter preflight
+Each candidate parameter is tested independently at the midpoint of its declared range using newly executed APSIMx runs. No baseline, preflight, Morris run, cache, fixture, or index from an earlier version is read. A factor is admitted only if APSIMx succeeds and all six target responses are finite.
+### How the parameter preflight works
+
+Each candidate parameter is tested alone at a value inside its declared range. If the midpoint equals the reported default, the test shifts to the first quartile so that a real change is attempted. A factor is accepted only when APSIMx succeeds and all six outputs produce a finite target.
+
+The preflight is an implementation test, not a sensitivity result. Acceptance proves that the override path is usable within this workflow; rejection can reflect an invalid APSIMx path, a failed model run or missing responses.
+
+```{r parameter-preflight, include=FALSE, eval=params$execute_runs}
+preflight_rows <- vector("list",nrow(all_parameter_spec))
+for(i in seq_len(nrow(all_parameter_spec))) {
+ sp <- all_parameter_spec[i,,drop=FALSE]; test_value <- (sp$lower+sp$upper)/2
+ if(is.finite(sp$default_reported)&&isTRUE(all.equal(test_value,sp$default_reported))) test_value <- sp$lower+0.25*(sp$upper-sp$lower)
+ rr <- run_apsim_multivariate(i,single_parameter_override(sp,test_value),"preflight",baseline$biomass_sources)
+ tt <- multivariate_target(rr,baseline)
+ accepted <- isTRUE(rr$model_success)&&isTRUE(tt$available)
+ preflight_rows[[i]] <- data.frame(candidate_index=i,crop=sp$crop,role=sp$role,factor=sp$factor,parameter=sp$parameter,tested_value=test_value,model_success=isTRUE(rr$model_success),response_available=isTRUE(tt$available),accepted=accepted,exit_status=scalar_num(rr$exit_status),reason=if(accepted) "" else if(!isTRUE(rr$model_success)) scalar_chr(rr$reason,"Model failed") else scalar_chr(tt$reason,"Responses unavailable"),stderr_path=scalar_chr(rr$stderr_path,""),elapsed_seconds=scalar_num(rr$elapsed_seconds),stringsAsFactors=FALSE)
+}
+preflight_audit <- do.call(rbind,preflight_rows)
+write.csv(preflight_audit,file.path(analysis_root,"parameter_preflight_audit.csv"),row.names=FALSE)
+write.csv(preflight_audit[!preflight_audit$accepted,,drop=FALSE],file.path(analysis_root,"parameter_preflight_rejected.csv"),row.names=FALSE)
+valid_parameter_spec <- all_parameter_spec[preflight_audit$accepted,,drop=FALSE]; rownames(valid_parameter_spec)<-NULL
+if(!nrow(valid_parameter_spec)) stop("Parameter preflight rejected all candidate factors. See parameter_preflight_audit.csv. Morris runs were not started.")
+expected_morris_runs <- as.integer(params$trajectories)*(nrow(valid_parameter_spec)+1L)
+run_plan <- data.frame(candidate_factors=nrow(all_parameter_spec),accepted_factors=nrow(valid_parameter_spec),rejected_factors=sum(!preflight_audit$accepted),baseline_runs=1L,preflight_runs=nrow(all_parameter_spec),morris_runs=expected_morris_runs,total_physical_runs=1L+nrow(all_parameter_spec)+expected_morris_runs)
+```
+## Preflight audit
+### How to read the preflight audit
+
+Each row documents one candidate override. `model_success` checks APSIMx execution, `response_available` checks the six outputs, and `accepted` is the final decision. For rejected factors, `reason`, `exit_status` and `stderr_path` identify the failure.
+
+Only accepted rows enter the Morris design. Do not rank parameters using preflight runtimes or response changes, because the test values and one-at-a-time structure were chosen for validation rather than sensitivity estimation.
+
+```{r preflight-audit}
+show_table(preflight_audit,100)
+```
+## Validated Morris run plan
+### How to read the validated run plan
+
+The table counts candidate, accepted and rejected factors and translates the validated factor count into the required Morris simulations. With `r` trajectories and `k` accepted factors, the Morris component requires `$r \times (k + 1)$` runs. Baseline and preflight executions are then added to obtain total physical runs.
+
+This table is the authoritative computational plan for the current execution. It may differ from the original 24-factor expectation because invalid override paths are excluded before design construction.
+
+```{r preflight-run-plan}
+show_table(run_plan,20)
+```
+
+## Planned computation time
+
+The validated run plan is the authoritative workload. Physical APSIMx runs equal one baseline, one preflight run for every candidate factor, and `trajectories * (accepted factors + 1)` Morris runs. With 24 candidates and 16 accepted factors, the smoke profile requires 59 physical runs and the full 10-trajectory profile requires 195. Actual totals are recalculated after preflight. No fixed wall-clock duration is assumed before execution; the report derives an empirical estimate from observed run durations on the current workstation.
+
+```{r planned-computation-time}
+planned_computation <- data.frame(
+  analysis_profile = profile,
+  candidate_factors = run_plan$candidate_factors,
+  accepted_factors = run_plan$accepted_factors,
+  trajectories = as.integer(params$trajectories),
+  baseline_runs = run_plan$baseline_runs,
+  preflight_runs = run_plan$preflight_runs,
+  morris_runs = run_plan$morris_runs,
+  planned_physical_APSIMx_runs = run_plan$total_physical_runs,
+  stringsAsFactors = FALSE
+)
+planned_computation
+write.csv(
+  planned_computation,
+  file.path(analysis_root, "planned_computation.csv"),
+  row.names = FALSE
+)
+```
+# Unified Morris design and runs
+
+### What happens during the Morris experiment
+
+The block constructs an optimised one-at-a-time Morris design over the validated ranges. Each design row is converted to crop-specific APSIMx overrides, the full five-year rotation is run, and the six responses plus the composite score are recorded. After all complete runs, `sensitivity::tell()` reconstructs elementary effects and calculates `mu`, `mu*` and `sigma`.
+
+If any score is missing, the run inventory is saved but indices are not reported as complete. This conservative rule avoids calculating a trajectory-based ranking from broken paths.
+
+```{r execute-morris, include=FALSE, eval=params$execute_runs}
+set.seed(as.integer(params$seed))
+design <- sensitivity::morris(model=NULL,factors=valid_parameter_spec$factor,r=as.integer(params$trajectories),design=list(type="oat",levels=as.integer(params$levels),grid.jump=as.integer(params$grid_jump)),binf=valid_parameter_spec$lower,bsup=valid_parameter_spec$upper,scale=TRUE)
+X<-as.data.frame(design$X,check.names=FALSE); runs<-vector("list",nrow(X)); score<-rep(NA_real_,nrow(X)); response_rows<-vector("list",nrow(X))
+for(i in seq_len(nrow(X))) {
+ overrides<-make_overrides_by_crop(X[i,,drop=FALSE],valid_parameter_spec); rr<-run_apsim_multivariate(i,overrides,"morris",baseline$biomass_sources); runs[[i]]<-rr; tt<-multivariate_target(rr,baseline); score[i]<-tt$score
+ response_rows[[i]]<-data.frame(run_index=i,run_id=scalar_chr(rr$run_id),model_success=isTRUE(rr$model_success),yield_wheat=tt$response["yield_wheat"],yield_maize=tt$response["yield_maize"],yield_soybean=tt$response["yield_soybean"],biomass_wheat=tt$response["biomass_wheat"],biomass_maize=tt$response["biomass_maize"],biomass_soybean=tt$response["biomass_soybean"],normalized_yield_wheat=tt$normalized["yield_wheat"],normalized_yield_maize=tt$normalized["yield_maize"],normalized_yield_soybean=tt$normalized["yield_soybean"],normalized_biomass_wheat=tt$normalized["biomass_wheat"],normalized_biomass_maize=tt$normalized["biomass_maize"],normalized_biomass_soybean=tt$normalized["biomass_soybean"],multivariate_score=tt$score,response_available=isTRUE(tt$available),reason=if(isTRUE(tt$available)) "" else if(!isTRUE(rr$model_success)) scalar_chr(rr$reason,"Model failed") else scalar_chr(tt$reason),exit_status=scalar_num(rr$exit_status),stderr_path=scalar_chr(rr$stderr_path,""),elapsed_seconds=scalar_num(rr$elapsed_seconds),stringsAsFactors=FALSE)
+}
+run_table<-do.call(rbind,response_rows); complete<-is.finite(score); results_dir<-file.path(analysis_root,"all_cultivars","results"); dir.create(results_dir,recursive=TRUE,showWarnings=FALSE); write.csv(run_table,file.path(results_dir,"multivariate_runs.csv"),row.names=FALSE)
+if(!all(complete)) { write.csv(run_table[!complete,,drop=FALSE],file.path(results_dir,"multivariate_runs_incomplete.csv"),row.names=FALSE); indices<-data.frame(); status<-data.frame(status="incomplete",runs=nrow(X),complete=sum(complete),failed_or_missing=sum(!complete),reason="At least one validated-design response vector is incomplete")
+} else { told<-sensitivity::tell(design,score); ee<-told$ee; indices<-data.frame(crop=valid_parameter_spec$crop,role=valid_parameter_spec$role,parameter=valid_parameter_spec$parameter,lower=valid_parameter_spec$lower,upper=valid_parameter_spec$upper,default_reported=valid_parameter_spec$default_reported,mu=apply(ee,2,mean,na.rm=TRUE),mu_star=apply(abs(ee),2,mean,na.rm=TRUE),sigma=apply(ee,2,stats::sd,na.rm=TRUE),stringsAsFactors=FALSE); indices$rank_global<-rank(-indices$mu_star,ties.method="min"); indices<-indices[order(indices$rank_global,-indices$sigma),]; write.csv(indices,file.path(results_dir,"morris_multivariate_global_ranking.csv"),row.names=FALSE); write.csv(indices,file.path(results_dir,"morris_indices.csv"),row.names=FALSE); status<-data.frame(status="complete",runs=nrow(X),complete=nrow(X),failed_or_missing=0L,reason="One multivariate target and one global ranking") }
+canonical_fixture<-list(schema_version="1.18",created=Sys.time(),design_id=design_id,analysis_profile=profile,runtime_configuration=runtime_configuration,target_definition=list(response_names=response_names,weights=response_weights,formula="weighted RMS of normalized deviations from the common baseline"),baseline=baseline,baseline_diagnostics=baseline_diagnostics,preflight=preflight_audit,valid_parameter_spec=valid_parameter_spec,run_plan=run_plan,design=X,runs=run_table,status=status,indices=indices)
+fixture_path<-file.path(analysis_root,"morris_multivariate_all_cultivars_fixture_v118.rds"); saveRDS(canonical_fixture,fixture_path)
+```
+
+## Unified run status
+
+### How to read run status
+
+`status` reports whether the validated Morris design is complete, how many runs were expected and completed, and how many failed or lacked responses. A complete analysis should show zero failed or missing vectors.
+
+This table should be presented before the ranking. A visually plausible ranking is not sufficient if the trajectory set is incomplete.
+
+```{r run-status}
+show_table(status,100)
+```
+
+## Measured and projected computation time
+
+The runner records elapsed seconds for the baseline, every preflight run, and every Morris run. The table below reports measured APSIMx time and projects the full 10-trajectory workload from the observed mean seconds per physical run. This is an empirical planning value for the current workstation, not a guaranteed duration on another computer.
+
+```{r measured-computation-time}
+baseline_seconds <- scalar_num(baseline$elapsed_seconds, NA_real_)
+preflight_seconds <- suppressWarnings(as.numeric(preflight_audit$elapsed_seconds))
+morris_seconds <- suppressWarnings(as.numeric(run_table$elapsed_seconds))
+all_elapsed_seconds <- c(baseline_seconds, preflight_seconds, morris_seconds)
+all_elapsed_seconds <- all_elapsed_seconds[is.finite(all_elapsed_seconds)]
+observed_run_count <- length(all_elapsed_seconds)
+mean_seconds_per_run <- if (observed_run_count) mean(all_elapsed_seconds) else NA_real_
+measured_APSIMx_hours <- if (observed_run_count) sum(all_elapsed_seconds) / 3600 else NA_real_
+full_morris_runs <- 10L * (nrow(valid_parameter_spec) + 1L)
+full_total_physical_runs <- 1L + nrow(all_parameter_spec) + full_morris_runs
+projected_full_hours <- if (is.finite(mean_seconds_per_run)) {
+  full_total_physical_runs * mean_seconds_per_run / 3600
+} else {
+  NA_real_
+}
+computation_time <- data.frame(
+  analysis_profile = profile,
+  observed_physical_runs = observed_run_count,
+  mean_seconds_per_run = mean_seconds_per_run,
+  measured_APSIMx_hours = measured_APSIMx_hours,
+  full_profile_trajectories = 10L,
+  projected_full_physical_runs = full_total_physical_runs,
+  projected_full_hours = projected_full_hours,
+  stringsAsFactors = FALSE
+)
+computation_time
+write.csv(
+  computation_time,
+  file.path(analysis_root, "computation_time_estimate.csv"),
+  row.names = FALSE
+)
+```
+
+## Multivariate response inventory
+
+### How to read the multivariate run inventory
+
+Each row is one Morris design point. It contains raw yield and biomass values, their normalised deviations, the unified score, model status, response availability, logs and runtime. The inventory is the full trace from parameter design to model response.
+
+Use it to check ranges, repeated values and crop-specific behaviour. `multivariate_score` is non-negative by construction. The normalised component columns preserve direction: negative values are below baseline and positive values are above baseline.
+
+```{r run-inventory}
+show_table(run_table,250)
+```
+
+## Incomplete response vectors
+
+### How to read incomplete response vectors
+
+This table filters runs whose composite score is not finite. If it is empty, all response vectors required by the Morris trajectories are complete. Otherwise, `reason`, `exit_status` and `stderr_path` show whether the issue was model failure or output extraction.
+
+Incomplete runs should be resolved before interpreting `mu*` or `sigma`. Simply deleting individual points would break the trajectory structure and bias the elementary effects.
+
+```{r incomplete-runs}
+show_table(run_table[!is.finite(run_table$multivariate_score),,drop=FALSE],250)
+```
+
+# Global Morris ranking
+
+### Why the canonical Morris fixture is reloaded
+
+After execution, this hidden block reads the saved v1.18 fixture and verifies its schema. Tables and plots below are therefore generated from a fixed analytical object containing the design, baseline, preflight, runs and indices.
+
+This makes the reporting stage auditable and prevents later chunks from silently using transient objects that differ from the saved analysis.
+
+```{r load-fixture, include=FALSE}
+fixture_path <- file.path(analysis_root,"morris_multivariate_all_cultivars_fixture_v118.rds")
+if (!file.exists(fixture_path)) stop("Canonical fixture not found: ",fixture_path)
+fixture <- readRDS(fixture_path)
+stopifnot(identical(fixture$schema_version,"1.18"))
+indices <- fixture$indices
+run_table <- fixture$runs
+```
+
+### How to read the Morris indices
+
+Each row is one validated parameter. `mu` is the signed mean elementary effect, `mu_star` is the mean absolute elementary effect, and `sigma` is the standard deviation of elementary effects across trajectories. `rank_global` orders parameters by decreasing `mu_star`.
+
+Because the target is an RMS magnitude, `mu_star` is the primary importance measure. A large `sigma` indicates non-linear effects, interactions with other factors, or state-dependent behaviour. The sign of `mu` should be interpreted cautiously because the composite target discards the desirable or undesirable direction of individual yield and biomass changes.
+
+```{r indices-table}
+show_table(indices,250)
+```
+
+### How to read the global ranking plot
+
+Bars show `mu*`, ordered from lower to higher along the displayed axis, and colours identify the crop to which each parameter belongs. Longer bars indicate a larger average influence on the six-component composite response over the tested parameter range.
+
+The chart is a screening ranking, not a percentage contribution and not a causal decomposition of variance. Differences between close bars may not be practically meaningful without considering `sigma`, parameter ranges and trajectory count.
+
+```{r global-ranking-plot}
+if (is.data.frame(indices) && nrow(indices)) {
+  print(ggplot(indices,aes(reorder(paste(crop,role,sep=" / "),mu_star),mu_star,fill=crop)) +
+    geom_col() + coord_flip() +
+    labs(title="Global multivariate Morris ranking",
+         subtitle="Single target combining yield and total biomass for all three cultivars",
+         x="Cultivar parameter",y=expression(mu^"*"),fill="Crop") + theme_minimal())
+} else empty_plot("No complete multivariate Morris indices are available")
+```
+
+### How to read the `mu*`-`sigma` plot
+
+The horizontal axis measures overall influence; the vertical axis measures variability of that influence. Parameters far to the right and low have strong, relatively consistent effects. Parameters high on the plot have effects that change across the factor space, suggesting non-linearity or interactions.
+
+A common reading is: low `mu*`, low `sigma` means low priority; high `mu*`, low `sigma` means influential and stable; high `mu*`, high `sigma` means influential but context dependent. Labels may overlap, so the indices table remains the definitive numerical source.
+
+```{r global-mu-sigma-plot}
+if (is.data.frame(indices) && nrow(indices)) {
+  print(ggplot(indices,aes(mu_star,sigma,colour=crop,label=paste(crop,role,sep=" / "))) +
+    geom_point(size=2.7) + geom_text(nudge_x=.02,size=3,check_overlap=TRUE) +
+    labs(title="Global multivariate elementary effects",x=expression(mu^"*"),y=expression(sigma),colour="Crop") + theme_minimal())
+} else empty_plot("No complete multivariate Morris indices are available")
+```
+
+# Response-component diagnostics
+
+These plots do not create separate rankings. They show how the six components contribute to the single multivariate target.
+
+### How to read the response-component diagnostic
+
+The six lines show the signed, baseline-normalised deviations of crop yield and biomass for every Morris run. This figure explains what lies behind the single score: it can reveal whether a high score is driven by one crop, one response type or several components together.
+
+The x-axis is run order, not time, and lines connecting runs do not represent biological trajectories through the five-year rotation. This plot does not generate six separate Morris rankings. Negative values mean below-baseline responses, positive values above baseline, and zero equality with baseline.
+
+```{r response-components}
+component_columns <- c("normalized_yield_wheat","normalized_yield_maize",
+                       "normalized_yield_soybean","normalized_biomass_wheat","normalized_biomass_maize","normalized_biomass_soybean")
+long_components <- reshape(
+  run_table[,c("run_index",component_columns)],
+  varying=component_columns,v.names="normalized_response",
+  timevar="component",times=component_columns,direction="long"
+)
+print(ggplot(long_components,aes(run_index,normalized_response,colour=component)) +
+  geom_line(alpha=.7) + labs(title="Components of the unified target",
+  x="Morris run",y="Normalized deviation from baseline",colour="Response") + theme_minimal())
+```
+
+# Output files
+
+### Output locations
+
+The final table records the canonical fixture and analysis directory. The fixture is the complete reproducible object for the design, execution audit and ranking; the directory contains CSV diagnostics and result files.
+
+For archiving or presenting the study, retain the Rmd, fixture, preflight audit, run inventory and Morris indices together. The temporary workspace `runs/m114_*` execution tree is useful for troubleshooting but is not a substitute for the durable analytical outputs.
+
+```{r files}
+data.frame(analysis_profile=profile,fixture=fixture_path,analysis_directory=analysis_root,
+ execution_directory=execution_root,log_directory=log_root,runtime_configuration=file.path(log_root,"runtime_configuration.csv"),stringsAsFactors=FALSE)
+```
+
+
+# Total document elapsed time
+
+The final table reports the complete R Markdown elapsed time, including configuration, model execution, output extraction, sensitivity calculations, and graphics.
+
+```{r total-document-time}
+TOTAL_DOCUMENT_ELAPSED_SECONDS <- as.numeric(
+  difftime(Sys.time(), DOCUMENT_STARTED_AT, units = "secs")
+)
+document_time <- data.frame(
+  analysis_profile = profile,
+  total_render_seconds = TOTAL_DOCUMENT_ELAPSED_SECONDS,
+  total_render_minutes = TOTAL_DOCUMENT_ELAPSED_SECONDS / 60,
+  total_render_hours = TOTAL_DOCUMENT_ELAPSED_SECONDS / 3600,
+  stringsAsFactors = FALSE
+)
+document_time
+write.csv(
+  document_time,
+  file.path(analysis_root, "document_elapsed_time.csv"),
+  row.names = FALSE
+)
+```

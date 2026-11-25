@@ -1,281 +1,102 @@
-# rSpacing / Spacing.Tool2 test workspace
+# rSpacing
 
-This workspace is the stable local layout for testing and future development. The R package and C# solution remain in two independent Git repositories.
+An R interface to **Spacing.Tool2**, the command-line runner of APSIM Next Generation for the SPACING project. With rSpacing you describe a site, a soil and a crop rotation with its management in R, run it with Tool2, and read, summarise and plot the APSIM outputs.
 
-## Required layout
+**Version:** 0.10.09 (`packageVersion("rSpacing")` shows `0.10.9`). Model runs need **Spacing.Tool2 >= 0.09.10** and .NET 8.
 
-```text
-rSpacing_workspace/
-├── README.md
-├── TEST_PROTOCOL.md
-├── environment_check.R
-├── setup_workspace.ps1
-├── rSpacing/          # rSpacing/ folder in the R package repository, version 0.10.05
-├── apsim/             # apsim/ folder in the APSIMxSpacing C# repository, Spacing.Tool2 version 0.09.05
-├── workflows/         # writable copies of operational Rmd files (created during setup)
-├── runs/              # temporary APSIMx runs; not versioned (created during setup)
-├── results/           # persistent tables, figures, fixtures, and rankings (created during setup)
-└── logs/              # environment, build, and test logs (created during setup)
-```
+## Install
 
-Do not place `runs/`, `results/`, or `logs/` inside either repository.
-
-## Repository references
-
-```text
-rSpacing repository URL: https://github.com/mauriziobagnara/rSpacing
-rSpacing branch: development-Maurizio
-rSpacing tag or commit:
-Expected package version: 0.10.05
-
-Spacing.Tool2 repository URL: https://github.com/mauriziobagnara/APSIMxSpacing
-Spacing.Tool2 branch: main
-Spacing.Tool2 tag or commit: 
-Expected runtime version: 0.09.05
-```
-
-## First use
-
-1. Place or clone the R repository as `rSpacing`.
-2. Place or clone the C# repository as `apsim`.
-3. Open PowerShell in the workspace root.
-4. Prepare the workspace:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\setup_workspace.ps1
-```
-
-5. Start R from the workspace root and run:
+From the root of the source package, build and install the tarball with the vignette:
 
 ```r
-source("environment_check.R")
+install.packages(c("devtools", "knitr", "rmarkdown"))
+tarball <- devtools::build(pkg = ".", vignettes = TRUE, manual = FALSE)
+install.packages(tarball, repos = NULL, type = "source")
 ```
 
-6. Do not continue if a check marked `required = TRUE` fails in:
-
-```text
-logs/environment_check.csv
-```
-
-## Compile Spacing.Tool2
-
-Open PowerShell in the workspace root and run:
-
-```powershell
-dotnet restore .\apsim\src\Spacing.Tool2\Spacing.Tool2.csproj 2>&1 |
-  Tee-Object .\logs\dotnet_restore.log
-
-dotnet build .\apsim\src\Spacing.Tool2\Spacing.Tool2.csproj `
-  --configuration Debug `
-  --framework net8.0 2>&1 |
-  Tee-Object .\logs\dotnet_build.log
-```
-
-Expected Debug DLL:
-
-```text
-apsim/src/Spacing.Tool2/bin/Debug/net8.0/spacing-tool2.dll
-```
-
-The workspace also accepts a Release build at:
-
-```text
-apsim/src/Spacing.Tool2/bin/Release/net8.0/spacing-tool2.dll
-```
-
-## Install rSpacing and build the vignette
-
-The `.Rproj` file is not installed. It only opens the workspace as an RStudio project and sets the working directory.
-
-From the workspace root, install directly from the package source with vignette construction enabled:
+Restart R, then check:
 
 ```r
-workspace_root <- normalizePath(
-  ".",
-  winslash = "/",
-  mustWork = TRUE
-)
-
-package_root <- file.path(
-  workspace_root,
-  "rSpacing"
-)
-
-stopifnot(
-  file.exists(
-    file.path(package_root, "DESCRIPTION")
-  )
-)
-
-devtools::install(
-  pkg = package_root,
-  build = TRUE,
-  build_vignettes = TRUE,
-  dependencies = TRUE,
-  upgrade = FALSE
-)
+library(rSpacing)
+packageVersion("rSpacing")                          # 0.10.9
+vignette("rSpacing-workflow_EN", package = "rSpacing")
 ```
 
-Restart R and verify:
+If the vignette does not appear, run `tools::buildVignettes(dir = ".")` from the package root to see the error.
+
+## Quick start: a scenario run
+
+A scenario is a site, a period, an optional soil profile and an ordered list of crops, each with its own management. Paths below are relative to a workspace that holds the C# solution in `apsim/` (see the workspace `README.md`).
 
 ```r
 library(rSpacing)
 
-packageVersion("rSpacing")
-vignette(package = "rSpacing")
-vignette(
-  "rSpacing-workflow_EN",
-  package = "rSpacing"
-)
+crops <- list(
+  spacing_crop("Soybean", "Generic_MG1", c("1-may", "15-jun"), 35, 35, 450,
+               tillage = spacing_tillage("no-till")),
+  spacing_crop("Wheat", "Claire", c("10-oct", "20-nov"), 180, 35, 180,
+               fertilisation = spacing_fertilisation(30, list(
+                 spacing_fertiliser_application(70, trigger = "Stage", stage = "MaximumSpikeletPrimordia"),
+                 spacing_fertiliser_application(50, trigger = "Stage", stage = "FlagLeafAppearance"))),
+               tillage = spacing_tillage("minimum"), organic = spacing_organic_n(20)),
+  spacing_crop("Maize", "B_130", c("1-apr", "10-may"), 7.5, 50, 750,
+               fertilisation = spacing_fertilisation(50, list(
+                 spacing_fertiliser_application(100, trigger = "DaysAfterSowing", days_after_sowing = 35))),
+               irrigation = spacing_irrigation(TRUE, 0.50, 0.85, 35, "1-jun", "31-aug")))
+
+scenario <- new_spacing_scenario("my_rotation", crops, latitude = 44.90, longitude = 10.63,
+                                 start_year = 2020, end_year = 2024, cycles = 2)
+
+cfg <- spacing_config(apsim_dir = "apsim", use_compiled = TRUE,
+                      executable = "apsim/src/Spacing.Tool2/bin/Debug/net8.0/spacing-tool2.dll")
+run <- run_spacing(cfg, scenario)
+result <- read_spacing(run)
+
+run$result$yields                 # mean yield by crop (kg/ha)
+spacing_crop_summary(result)      # one row per crop: sowing, harvest, yield, soil C, N2O, leaching
+plot_spacing_yield(result)
 ```
 
-Expected package version:
+`write_spacing_scenario()` saves the request JSON, which can also be given to Tool2 directly with `--request`.
 
-```text
-0.10.05 or 0.10.5
-```
+## What the package covers
 
-### Recommended clean installation from a source tarball
+| Area | Main functions |
+|---|---|
+| Crops and management | `spacing_crop()`, `spacing_fertilisation()`, `spacing_fertiliser_application()`, `spacing_irrigation()`, `spacing_irrigation_event()`, `spacing_tillage()`, `spacing_tillage_operation()`, `spacing_organic_n()`, `spacing_organic_application()`, `spacing_sowing_rule()` |
+| Rotations | `new_spacing_scenario()` (repeated crops, `cycles`), `spacing_termination()` (cover crops), `spacing_intercrop()`, `spacing_perennial()`, `spacing_residue_removal()`, `spacing_surface_residue()` |
+| Soil | `spacing_soil_profile()`, `as_spacing_soil_profile()` |
+| APSIM names | `spacing_cultivars()`, `spacing_crop_stages()`, `spacing_fertiliser_types()`, `spacing_residue_types()` |
+| Running Tool2 | `spacing_config()`, `run_spacing()`, `write_spacing_scenario()`, `new_spacing_request()` (single-crop requests) |
+| Outputs | `read_spacing()`, `spacing_daily()`, `spacing_report()`, `spacing_crop_summary()`, `spacing_units()`, `summary()`, `spacing_variable_dictionary()`, `spacing_report_spec()` (extra output variables) |
+| Plots | `plot_spacing_yield()`, `plot_spacing_daily_panel()`, `plot_spacing_report_panel()`, `plot_spacing_soil_profile()`, `plot_spacing_soil_carbon()`, `plot_spacing_fertilisation()`, `plot_spacing_irrigation()`, `plot_spacing_comparison()`, `plot_spacing_map()`, `plot_spacing_met()` |
+| Weather files | `read_spacing_met()`, `new_spacing_met()`, `prepare_spacing_met()`, `set_spacing_met_column()`, `write_spacing_met()` |
+| Run specifications | `new_spacing_run_spec()`, `spacing_parameter_catalogue()`, `write_spacing_run_spec()`, `read_spacing_run_spec()`, `update_spacing_parameters()` |
 
-For the final delivery test, build and install the source tarball:
+Every function has a help page with runnable examples (`?spacing_crop`). The help index groups them by family.
+
+## Learning material
+
+- **Cookbook** (`inst/rmarkdown/rSpacing_cookbook_v1.00_EN.Rmd`): every scenario option, run with Tool2 and checked automatically. Start here.
+- **Vignette** `rSpacing-workflow_EN`: reading, summarising and plotting results from a bundled reference run, with no model run needed.
+- **Examples** in `inst/examples/`: `scenario_tool2_request.R`, `scenario_management_events.R`, `scenario_rotation_options.R`, `calibration_run_spec.R`.
+- **Workflows** in `inst/rmarkdown/`: operational manual, five-year rotation report, scenario comparison, Morris sensitivity and input-uncertainty analyses. See `inst/rmarkdown/README.md`. Copy them to a writable folder before rendering.
+
+## Development checks
 
 ```r
-workspace_root <- normalizePath(
-  ".",
-  winslash = "/",
-  mustWork = TRUE
-)
-
-package_root <- file.path(
-  workspace_root,
-  "rSpacing"
-)
-
-tarball <- devtools::build(
-  pkg = package_root,
-  vignettes = TRUE,
-  manual = FALSE
-)
-
-install.packages(
-  tarball,
-  repos = NULL,
-  type = "source"
-)
+roxygen2::roxygenise()
+testthat::test_local()
+rcmdcheck::rcmdcheck(args = "--no-manual")
 ```
 
-Restart R and verify:
+Unit tests need neither APSIM nor .NET. The integration tests run Tool2 and are skipped unless these variables are set:
 
 ```r
-library(rSpacing)
-
-stopifnot(
-  packageVersion("rSpacing") ==
-    numeric_version("0.10.05")
-)
-
-vignette(package = "rSpacing")
-vignette(
-  "rSpacing-workflow_EN",
-  package = "rSpacing"
-)
+Sys.setenv(RSPACING_INTEGRATION = "true",
+           RSPACING_APSIM_DIR   = "<workspace>/apsim",
+           RSPACING_TOOL2_DLL   = "<workspace>/apsim/src/Spacing.Tool2/bin/Debug/net8.0/spacing-tool2.dll")
+testthat::test_local()
 ```
 
-### Build only the vignette
-
-```r
-tools::buildVignettes(
-  dir = file.path(
-    normalizePath(
-      ".",
-      winslash = "/",
-      mustWork = TRUE
-    ),
-    "rSpacing"
-  )
-)
-```
-
-### Diagnose a missing installed vignette
-
-```r
-pkg <- find.package("rSpacing")
-
-file.exists(
-  file.path(pkg, "Meta", "vignette.rds")
-)
-
-list.files(
-  file.path(pkg, "doc"),
-  recursive = TRUE,
-  full.names = TRUE
-)
-```
-
-The expected result is:
-
-- `Meta/vignette.rds` exists;
-- the installed `doc/` directory contains the rendered vignette;
-- `vignette("rSpacing-workflow_EN", package = "rSpacing")` opens the manual.
-
-## Copy operational workflows
-
-The package distributes operational R Markdown files under `rSpacing/inst/rmarkdown/`. Copy them to the writable `workflows/` directory before execution:
-
-```r
-workspace_root <- normalizePath(
-  ".",
-  winslash = "/",
-  mustWork = TRUE
-)
-
-source_dir <- file.path(
-  workspace_root,
-  "rSpacing",
-  "inst",
-  "rmarkdown"
-)
-
-target_dir <- file.path(
-  workspace_root,
-  "workflows"
-)
-
-files <- list.files(
-  source_dir,
-  pattern = "[.]Rmd$",
-  full.names = TRUE
-)
-
-stopifnot(length(files) > 0L)
-dir.create(target_dir, recursive = TRUE, showWarnings = FALSE)
-
-ok <- file.copy(
-  files,
-  target_dir,
-  overwrite = FALSE
-)
-
-if (!all(ok)) {
-  stop(
-    "One or more workflows already exist or could not be copied."
-  )
-}
-```
-
-Do not execute operational Rmd files inside the package source tree or installed R library.
-
-## Test order
-
-1. Environment check.
-2. C# restore and build.
-3. R package documentation, tests, vignette, and check.
-4. Clean source-tarball installation and installed vignette.
-5. Full-function manual without model execution.
-6. Full-function manual with model execution.
-7. Five-year workflow.
-8. Morris smoke test, then full Morris analysis.
-9. Input-uncertainty smoke test, then full uncertainty analysis.
-10. Final test report.
-
-The detailed criteria, evidence requirements, and stop conditions are defined in `TEST_PROTOCOL.md`.
+Changes by version are listed in `NEWS.md`.

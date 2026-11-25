@@ -1,0 +1,617 @@
+---
+title: "rSpacing/APSIMx: five-year input uncertainty analysis for environmental outputs, v1.06 workspace edition"
+author: "Maurizio Bagnara"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+params:
+  workspace_root: ".."
+  execute_runs: true
+  analysis_profile: "smoke"
+  samples: 30
+  seed: 1244
+  bootstrap_replicates: 50
+  output_subdir: "uncertainty_v106_smoke"
+  build_configuration: "Debug"
+  target_framework: "net8.0"
+  show_rows: 30
+---
+
+### How the document is prepared
+
+This block initialises the reporting environment. It applies consistent formatting to tables and figures, checks the required R packages, and defines small helper functions for displaying results and handling missing values. It does not produce scientific results; it makes all subsequent sections reproducible and consistent. The code is hidden because presentations should focus on the controls and outcomes rather than implementation details.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse=TRUE,comment="#>",warning=FALSE,message=FALSE,fig.width=10,fig.height=6)
+required_packages<-c("jsonlite","ggplot2")
+missing_packages<-required_packages[!vapply(required_packages,requireNamespace,logical(1),quietly=TRUE)]
+if(length(missing_packages)) stop("Missing R packages: ",paste(missing_packages,collapse=", "))
+has_rsqlite<-requireNamespace("DBI",quietly=TRUE)&&requireNamespace("RSQLite",quietly=TRUE)
+library(ggplot2)
+DOCUMENT_STARTED_AT <- Sys.time()
+show_table<-function(x,n=params$show_rows) if(is.null(x)||!is.data.frame(x)||!nrow(x)) data.frame(note="No data available") else utils::head(x,n)
+scalar_num<-function(x,default=NA_real_) { z<-suppressWarnings(as.numeric(unlist(x,use.names=FALSE))); z<-z[is.finite(z)]; if(length(z)) z[[1L]] else default }
+scalar_chr<-function(x,default="") { z<-as.character(unlist(x,use.names=FALSE)); z<-z[!is.na(z)&nzchar(z)]; if(length(z)) z[[1L]] else default }
+```
+
+# Purpose
+
+This autonomous R Markdown starts from the five-year 2020-2024 standard rotation (Soybean Generic_MG1 → winter wheat Claire → maize B_130) used by the five-year workflow v1.08 and by Morris v1.18. It propagates uncertainty in soil and management **input variables**, not cultivar parameters. Yield and biomass are excluded.
+
+The four environmental responses are analysed separately:
+
+1. final `SoilCtot_kgCha` on the last simulated date;
+2. five-year cumulative `N2O_total_kgNha`;
+3. five-year cumulative `CO2C_total_kgCha`;
+4. five-year cumulative `LeachNO3_kgNha`.
+
+No composite target is calculated.
+
+# Configuration
+
+### What is configured
+
+This block configures the link to `Spacing.Tool2`, the 2020-2024 period, the simulation location, mock weather, and the workspace directories dedicated to v1.06. It also verifies the project, DLL, and `dotnet`. The execution directory under `runs/` must be empty; otherwise execution stops so that previous results cannot be mixed with new simulations.
+
+**How to read this section.** These values define the experiment boundary; they are not uncertainty factors. Years, coordinates, cultivars, and mock weather remain fixed in all scenarios.
+
+```{r configuration}
+WORKSPACE_ROOT<-normalizePath(params$workspace_root,winslash="/",mustWork=TRUE)
+RSPACING_ROOT<-normalizePath(file.path(WORKSPACE_ROOT,"rSpacing"),winslash="/",mustWork=TRUE)
+SPACING_ROOT<-normalizePath(file.path(WORKSPACE_ROOT,"apsim"),winslash="/",mustWork=TRUE)
+BUILD_CONFIGURATION<-as.character(params$build_configuration)
+TARGET_FRAMEWORK<-as.character(params$target_framework)
+USE_MOCK_WEATHER<-TRUE
+START_YEAR<-2020L; END_YEAR<-2024L; LATITUDE<-44.9000; LONGITUDE<-10.6300; CELL_ID<-"GUA"
+normalize_win<-function(path,must_work=FALSE) normalizePath(path,winslash="/",mustWork=must_work)
+spacing_root<-SPACING_ROOT
+project_path<-file.path(spacing_root,"src","Spacing.Tool2","Spacing.Tool2.csproj")
+config_path<-file.path(spacing_root,"spacing.config.json")
+dll_debug<-file.path(spacing_root,"src","Spacing.Tool2","bin","Debug",TARGET_FRAMEWORK,"spacing-tool2.dll")
+dll_release<-file.path(spacing_root,"src","Spacing.Tool2","bin","Release",TARGET_FRAMEWORK,"spacing-tool2.dll")
+dll_candidates<-if(identical(tolower(BUILD_CONFIGURATION),"release")) c(dll_release,dll_debug) else c(dll_debug,dll_release)
+dll_found<-dll_candidates[file.exists(dll_candidates)]
+dll_path<-if(length(dll_found)) normalize_win(dll_found[[1L]],TRUE) else NA_character_
+if(!file.exists(project_path)) stop("Spacing.Tool2 project not found: ",project_path)
+if(!file.exists(config_path)) stop("spacing.config.json not found: ",config_path)
+if(is.na(dll_path)) stop("Spacing.Tool2 DLL not found. Checked: ",paste(dll_candidates,collapse="; "))
+if(!nzchar(Sys.which("dotnet"))) stop("dotnet was not found in the RStudio PATH")
+profile<-tolower(as.character(params$analysis_profile))
+if(!profile %in% c("smoke","full","custom")) stop("analysis_profile must be smoke, full, or custom")
+if(profile=="smoke" && (as.integer(params$samples)!=30L || as.integer(params$bootstrap_replicates)!=50L)) stop("Smoke profile requires samples = 30 and bootstrap_replicates = 50")
+if(profile=="full" && (as.integer(params$samples)!=500L || as.integer(params$bootstrap_replicates)!=500L)) stop("Full profile requires samples = 500 and bootstrap_replicates = 500")
+if(as.integer(params$samples)<30L) stop("At least 30 samples are required by the completion and PRCC checks")
+output_subdir<-as.character(params$output_subdir)
+if(!nzchar(output_subdir)||grepl("/", output_subdir, fixed=TRUE) || grepl("\\", output_subdir, fixed=TRUE)) stop("output_subdir must be one non-empty directory name")
+design_id<-paste0("lhs5y_environmental_inputs_",START_YEAR,"_",END_YEAR,"_n",params$samples,"_s",params$seed,"_v106")
+analysis_root<-file.path(WORKSPACE_ROOT,"results",output_subdir,design_id)
+execution_root<-file.path(WORKSPACE_ROOT,"runs",paste0("u106_",params$samples,"n"))
+log_root<-file.path(WORKSPACE_ROOT,"logs",output_subdir)
+dir.create(analysis_root,recursive=TRUE,showWarnings=FALSE)
+dir.create(log_root,recursive=TRUE,showWarnings=FALSE)
+if(dir.exists(execution_root)&&length(list.files(execution_root,all.files=TRUE,no..=TRUE))) stop("Fresh-run requirement failed: v1.06 execution directory already contains files: ",execution_root)
+dir.create(execution_root,recursive=TRUE,showWarnings=FALSE)
+runtime_configuration<-data.frame(
+ field=c("analysis_profile","samples","bootstrap_replicates","workspace_root","rspacing_root","spacing_root","project_path","config_path","tool2_dll","execution_root","analysis_root","log_root"),
+ value=c(profile,params$samples,params$bootstrap_replicates,WORKSPACE_ROOT,RSPACING_ROOT,SPACING_ROOT,project_path,config_path,dll_path,execution_root,analysis_root,log_root),stringsAsFactors=FALSE)
+write.csv(runtime_configuration,file.path(log_root,"runtime_configuration.csv"),row.names=FALSE)
+```
+
+# Five-year baseline scenario
+
+### What the five-year baseline builds
+
+This block recreates the same rotation used by the Morris workflow, in the order Soybean `Generic_MG1` → Wheat `Claire` → Maize `B_130` (v1.06: standard rotation revised for the Po Valley, with winter wheat `Claire`, maize `B_130`, wheat N at stem elongation and at flag leaf, and the same management as the five-year workflow v1.08; it requires Spacing.Tool2 >= 0.09.10, which sows the crops in sequence and applies N at crop stages), with six soil layers and the validated management practices. The baseline is the central scenario around which LHS perturbations are applied. The implementation is hidden, while the next table exposes the relevant values.
+
+```{r scenario, include=FALSE}
+soil_profile<-list(ProfileId="S1",CellId=CELL_ID,SoilType="Demonstration silt loam",DataSource="Synthetic demo profile; not observed soil data",AreaFraction=1,
+ Layers=list(
+ list(DepthTop=0,DepthBottom=15,Sand=20,Silt=58,Clay=22,DUL=.31,LL15=.14,SAT=.46,SW=.28,OC=1.45,BD=1.28,PH=7.2,NO3=18,NH4=2),
+ list(DepthTop=15,DepthBottom=30,Sand=19,Silt=59,Clay=22,DUL=.32,LL15=.15,SAT=.45,SW=.29,OC=1.15,BD=1.33,PH=7.3,NO3=12,NH4=1.5),
+ list(DepthTop=30,DepthBottom=60,Sand=18,Silt=57,Clay=25,DUL=.33,LL15=.16,SAT=.44,SW=.30,OC=.75,BD=1.39,PH=7.4,NO3=8,NH4=1),
+ list(DepthTop=60,DepthBottom=90,Sand=20,Silt=54,Clay=26,DUL=.32,LL15=.16,SAT=.43,SW=.29,OC=.48,BD=1.43,PH=7.5,NO3=5,NH4=.7),
+ list(DepthTop=90,DepthBottom=120,Sand=22,Silt=52,Clay=26,DUL=.31,LL15=.16,SAT=.42,SW=.28,OC=.32,BD=1.46,PH=7.6,NO3=3.5,NH4=.5),
+ list(DepthTop=120,DepthBottom=150,Sand=24,Silt=50,Clay=26,DUL=.30,LL15=.15,SAT=.41,SW=.27,OC=.24,BD=1.49,PH=7.7,NO3=2.5,NH4=.4)))
+base_crops<-list(
+ list(name="Wheat",management=list(cultivar="Claire",tillage_type="minimum",nitrogen_mineral_kg_ha=30,nitrogen_organic_kg_ha=20,sowing_window_start="10-oct",sowing_window_end="20-nov",sowing_density=180,sowing_depth=35,row_spacing=180,auto_irrigate=TRUE,irrigation_threshold=.35,irrigation_target=.70,max_irrigation_mm=25,irrigation_window_start="1-mar",irrigation_window_end="31-may",split_fertiliser=list(list(trigger="Stage",stage="MaximumSpikeletPrimordia",amount_kg_n_ha=70,fert_type="UreaN"),list(trigger="Stage",stage="FlagLeafAppearance",amount_kg_n_ha=50,fert_type="UreaN")))),
+ list(name="Maize",management=list(cultivar="B_130",tillage_type="conventional",nitrogen_mineral_kg_ha=50,nitrogen_organic_kg_ha=25,sowing_window_start="1-apr",sowing_window_end="10-may",sowing_density=7.5,sowing_depth=50,row_spacing=750,auto_irrigate=TRUE,irrigation_threshold=.50,irrigation_target=.85,max_irrigation_mm=35,irrigation_window_start="1-jun",irrigation_window_end="31-aug",split_fertiliser=list(list(trigger="DaysAfterSowing",days_after_sowing=35L,amount_kg_n_ha=100,fert_type="UreaN"),list(trigger="DaysAfterSowing",days_after_sowing=60L,amount_kg_n_ha=50,fert_type="UreaN")))),
+ list(name="Soybean",management=list(cultivar="Generic_MG1",tillage_type="no-till",nitrogen_mineral_kg_ha=0,nitrogen_organic_kg_ha=0,sowing_window_start="1-may",sowing_window_end="15-jun",sowing_density=35,sowing_depth=35,row_spacing=450,auto_irrigate=TRUE,irrigation_threshold=.45,irrigation_target=.80,max_irrigation_mm=30,irrigation_window_start="15-jun",irrigation_window_end="31-aug")))
+
+# ---- Tool2 >= 0.09.07: explicit soil parameters ----------------------------------------
+# Spacing.Tool2 <= 0.09.06 replaced these parameters with constants inside the C# code.
+# From 0.09.07 every soil parameter is read from the request; the values below are the
+# former constants, written explicitly so that they are visible, traceable and perturbable.
+# Replace them with measured or pedotransfer values for a real site.
+`%||%` <- function(a, b) if (is.null(a)) b else a
+complete_soil_profile <- function(sp, crop_names) {
+  n <- length(sp$Layers)
+  for (i in seq_len(n)) {
+    L <- sp$Layers[[i]]
+    L$AirDry      <- L$AirDry %||% (0.5 * L$LL15)
+    L$SWCON       <- L$SWCON %||% 0.3
+    L$SoilCNRatio <- L$SoilCNRatio %||% 12.5
+    L$FBiom       <- L$FBiom %||% (if (L$DepthTop < 15) 0.05 else if (L$DepthTop < 30) 0.02 else 0.01)
+    L$FInert      <- L$FInert %||% (if (L$DepthTop < 15) 0.45 else if (L$DepthTop < 30) 0.60 else 0.90)
+    L$FOM         <- L$FOM %||% (260 * exp(-0.02 * (i - 1) * (L$DepthBottom - L$DepthTop)))
+    L$Urea        <- L$Urea %||% 0
+    sp$Layers[[i]] <- L
+  }
+  kl <- 0.07 - (seq_len(n) - 1) / max(n - 1, 1) * 0.03
+  ll15 <- vapply(sp$Layers, function(z) z$LL15, numeric(1))
+  sp$CropParameters <- stats::setNames(lapply(crop_names, function(cn)
+    list(LL = ll15, KL = kl, XF = rep(1, n))), crop_names)
+  sp$Water <- list(SummerDate = "1-Jun", SummerU = 6, SummerCona = 3.5, WinterDate = "1-Oct",
+                   WinterU = 2, WinterCona = 2.5, DiffusConst = 40, DiffusSlope = 16, Salb = 0.13,
+                   CN2Bare = 73, CNRed = 20, CNCov = 0.8, FOMCNRatio = 50)
+  # Initial NO3/NH4/Urea are kg N/ha per layer (Tool2 InitialNUnits = "kgha")
+  sp$InitialNUnits <- "kgha"
+  sp
+}
+# Agronomic representation of tillage and organic N (Tool2 >= 0.09.07, AgronomicAssumptions).
+# Tillage is applied on the sowing day, after any organic input and before sowing.
+TILLAGE_ASSUMPTIONS <- list(
+  "conventional" = list(tillage_incorporation_fraction = 0.90, tillage_depth_mm = 250, tillage_cn_reduction = 20, tillage_cn_rain = 100),
+  "minimum"      = list(tillage_incorporation_fraction = 0.50, tillage_depth_mm = 120, tillage_cn_reduction = 10, tillage_cn_rain = 75),
+  "no-till"      = list(tillage_incorporation_fraction = 0.00, tillage_depth_mm = 0,   tillage_cn_reduction = 0,  tillage_cn_rain = 0))
+ORGANIC_ASSUMPTIONS <- list(organic_residue_type = "manure", organic_cn_ratio = 15)  # cattle FYM, 8 % C on applied mass
+complete_management <- function(m) {
+  for (k in names(TILLAGE_ASSUMPTIONS[[m$tillage_type]])) m[[k]] <- m[[k]] %||% TILLAGE_ASSUMPTIONS[[m$tillage_type]][[k]]
+  if (isTRUE(m$nitrogen_organic_kg_ha > 0)) for (k in names(ORGANIC_ASSUMPTIONS)) m[[k]] <- m[[k]] %||% ORGANIC_ASSUMPTIONS[[k]]
+  m
+}
+CROP_ORDER <- c("Soybean", "Wheat", "Maize")   # rotation sequence sent to Spacing.Tool2
+
+base_crops <- base_crops[match(CROP_ORDER, vapply(base_crops, function(z) z$name, character(1)))]
+for (i in seq_along(base_crops)) base_crops[[i]]$management <- complete_management(base_crops[[i]]$management)
+soil_profile <- complete_soil_profile(soil_profile, CROP_ORDER)
+```
+
+### How to read the reference soil profile and management
+
+The first table describes each soil layer: `OC` is initial organic carbon, `BD` is bulk density, `LL15`, `DUL`, and `SAT` are water limits, `SW` is initial water, `NO3` and `NH4` are mineral nitrogen forms, and `PH` describes soil reaction. The second table summarises cultivars, nitrogen inputs, and automatic irrigation.
+
+These values are not results. They are the nominal configuration from which the design generates lower and higher scenarios. The uncertainty is conditional on this synthetic baseline and does not represent measured error at a real site.
+
+```{r scenario-summary}
+scenario_layers <- do.call(rbind,lapply(soil_profile$Layers,function(z) data.frame(depth=paste0(z$DepthTop,"-",z$DepthBottom," cm"),OC=z$OC,BD=z$BD,LL15=z$LL15,DUL=z$DUL,SAT=z$SAT,SW=z$SW,NO3=z$NO3,NH4=z$NH4,PH=z$PH)))
+scenario_crops <- data.frame(crop=vapply(base_crops,function(z)z$name,character(1)),cultivar=vapply(base_crops,function(z)z$management$cultivar,character(1)),mineral_N_kg_ha=vapply(base_crops,function(z)z$management$nitrogen_mineral_kg_ha,numeric(1)),organic_N_kg_ha=vapply(base_crops,function(z)z$management$nitrogen_organic_kg_ha,numeric(1)),auto_irrigate=vapply(base_crops,function(z)isTRUE(z$management$auto_irrigate),logical(1)),stringsAsFactors=FALSE)
+show_table(scenario_layers,20)
+show_table(scenario_crops,20)
+```
+
+# Uncertain input factors
+
+All ranges are relative to the quinquennial baseline. The first version uses bounded uniform distributions because no site-specific measurement-error distributions were supplied. Soil hydraulic constraints are reconstructed, not checked only after sampling.
+
+### What the input catalogue represents
+
+Each row is one uncertain factor. `lower` and `upper` are the permitted bounds; for multipliers, 1 represents the baseline, while for shifts such as `ph_shift`, 0 represents no change. `group` distinguishes soil from management. In v1.05, all factors use bounded uniform distributions because no site-specific empirical distributions were supplied.
+
+**How to read the table.** A range of 0.70-1.30 means a change from -30% to +30%. A pH range of -0.5 to 0.5 means subtracting or adding up to half a pH unit. The bounds describe assumed uncertainty, not model sensitivity or final factor importance.
+
+```{r input-catalogue}
+input_spec<-data.frame(
+ factor=c("oc_stock_mult","oc_gradient","bd_mult","ll15_mult","dul_gap_mult","sat_gap_mult","initial_sw_fraction","soil_no3_mult","soil_nh4_mult","ph_shift","swcon_mult","soil_cn_mult","finert_mult","mineral_n_mult","organic_n_mult","split_n_mult","irrigation_threshold_shift","irrigation_target_shift","max_irrigation_mult","tillage_incorp_mult"),
+ group=c(rep("soil",13),rep("management",7)),
+ lower=c(.70,-.25,.94,.90,.85,.85,.25,.50,.50,-.5,.70,.85,.85,.70,.50,.70,-.10,-.10,.70,.70),
+ upper=c(1.30,.25,1.06,1.10,1.15,1.15,.75,1.50,1.50,.5,1.30,1.15,1.15,1.30,1.50,1.30,.10,.10,1.30,1.10),
+ distribution="uniform",stringsAsFactors=FALSE)
+show_table(input_spec,100)
+```
+
+# Constrained Latin hypercube
+
+### How physically consistent scenarios are generated
+
+These functions transform LHS values into soil profiles and management practices that APSIMx can use. The transformation preserves `LL15 < DUL < SAT`, keeps initial water between `LL15` and `DUL`, prevents negative carbon and nitrogen values, and bounds pH. For irrigation, the target is kept above the threshold.
+
+The code is hidden because the key point is the principle: sampling explores uncertainty without creating impossible profiles. A scenario that fails these checks is not sent to APSIMx.
+
+```{r lhs-functions, include=FALSE}
+random_lhs<-function(n,k,seed) { set.seed(seed); out<-matrix(NA_real_,n,k); for(j in seq_len(k)) out[,j]<-(sample.int(n)-runif(n))/n; out }
+scale_lhs<-function(U,spec) { X<-sweep(U,2,spec$upper-spec$lower,"*"); X<-sweep(X,2,spec$lower,"+"); colnames(X)<-spec$factor; as.data.frame(X,check.names=FALSE) }
+perturb_scenario<-function(x) {
+ sp<-soil_profile; layers<-sp$Layers; depths<-vapply(layers,function(z)(z$DepthTop+z$DepthBottom)/2,numeric(1)); z<-depths/max(depths); sat_clipped<-0L
+ for(i in seq_along(layers)) {
+  L<-layers[[i]]
+  airdry_ratio<-L$AirDry/L$LL15
+  L$OC<-max(.001,L$OC*x$oc_stock_mult*exp(-x$oc_gradient*z[i]))
+  L$BD<-max(.8,min(1.8,L$BD*x$bd_mult))
+  ll<-max(.01,min(.35,L$LL15*x$ll15_mult))
+  dul<-ll+max(.015,(L$DUL-L$LL15)*x$dul_gap_mult)
+  sat<-dul+max(.015,(L$SAT-L$DUL)*x$sat_gap_mult)
+  # v1.05: SAT cannot exceed total porosity 1 - BD/2.65 (APSIM and Tool2 >= 0.09.07 reject it).
+  # In v1.04 BD and SAT were sampled independently and 5/30 smoke samples were rejected by APSIM.
+  sat_max<-1-L$BD/2.65-.002
+  if(sat>sat_max) sat_clipped<-sat_clipped+1L
+  sat<-min(.65,sat,sat_max); dul<-min(dul,sat-.01); ll<-min(ll,dul-.01)
+  L$LL15<-ll; L$DUL<-dul; L$SAT<-sat; L$SW<-ll+x$initial_sw_fraction*(dul-ll)
+  L$AirDry<-min(ll,ll*airdry_ratio)
+  # v1.05: soil parameters that are inputs from Spacing.Tool2 0.09.07
+  L$SWCON<-max(.01,min(1,L$SWCON*x$swcon_mult))
+  L$SoilCNRatio<-max(5,L$SoilCNRatio*x$soil_cn_mult)
+  L$FInert<-max(0,min(.98,L$FInert*x$finert_mult))
+  L$NO3<-max(0,L$NO3*x$soil_no3_mult); L$NH4<-max(0,L$NH4*x$soil_nh4_mult); L$PH<-max(4,min(9,L$PH+x$ph_shift))
+  layers[[i]]<-L
+ }
+ sp$Layers<-layers
+ # crop lower limits follow the perturbed LL15 (baseline: LL = LL15)
+ for(cn in names(sp$CropParameters)) sp$CropParameters[[cn]]$LL<-vapply(layers,function(q)q$LL15,numeric(1))
+ crops<-base_crops
+ for(i in seq_along(crops)) {
+  m<-crops[[i]]$management
+  m$nitrogen_mineral_kg_ha<-max(0,m$nitrogen_mineral_kg_ha*x$mineral_n_mult)
+  m$nitrogen_organic_kg_ha<-max(0,m$nitrogen_organic_kg_ha*x$organic_n_mult)
+  if(!is.null(m$split_fertiliser)) for(j in seq_along(m$split_fertiliser)) m$split_fertiliser[[j]]$amount_kg_n_ha<-max(0,m$split_fertiliser[[j]]$amount_kg_n_ha*x$split_n_mult)
+  if(isTRUE(m$auto_irrigate)) {
+   m$irrigation_threshold<-max(.05,min(.90,m$irrigation_threshold+x$irrigation_threshold_shift))
+   m$irrigation_target<-max(m$irrigation_threshold+.05,min(.98,m$irrigation_target+x$irrigation_target_shift))
+   m$max_irrigation_mm<-max(1,m$max_irrigation_mm*x$max_irrigation_mult)
+  }
+  if(isTRUE(m$tillage_incorporation_fraction>0)) m$tillage_incorporation_fraction<-min(1,m$tillage_incorporation_fraction*x$tillage_incorp_mult)
+  crops[[i]]$management<-m
+ }
+ list(soil_profile=sp,crops=crops,sat_clipped_layers=sat_clipped)
+}
+validate_scenario<-function(z) {
+ L<-z$soil_profile$Layers
+ ok<-all(vapply(L,function(x) is.finite(x$OC)&&x$OC>=0&&is.finite(x$BD)&&x$BD>0&&x$LL15>0&&x$AirDry<=x$LL15&&x$LL15<x$DUL&&x$DUL<x$SAT&&x$SAT<=1-x$BD/2.65&&x$SW>=x$LL15&&x$SW<=x$DUL&&x$NO3>=0&&x$NH4>=0&&x$PH>=4&&x$PH<=9,logical(1)))
+ list(ok=ok,reason=if(ok) "" else "Invalid constrained soil or management scenario")
+}
+```
+
+### How the Latin Hypercube is built
+
+The block creates the number of stratified input combinations specified by `params$samples`, using seed 1244. Each factor spans its full defined range, with one value in each equiprobable stratum. The complete design is saved to `input_uncertainty_design.csv` before simulations begin.
+
+```{r lhs-design, include=FALSE}
+U<-random_lhs(as.integer(params$samples),nrow(input_spec),as.integer(params$seed)); uncertainty_design<-scale_lhs(U,input_spec); uncertainty_design$sample_id<-seq_len(nrow(uncertainty_design))
+write.csv(uncertainty_design,file.path(analysis_root,"input_uncertainty_design.csv"),row.names=FALSE)
+```
+
+### How to read the LHS summary
+
+The table checks the design before APSIMx results are interpreted. `samples` is the scenario count, `factors` is the input count, and `seed` makes sampling reproducible. `expected_min` and `expected_max` are the extrema actually reached by the sampled design. They should be close, but not necessarily identical, to the theoretical catalogue bounds.
+
+If an observed extreme is much narrower than expected, the issue concerns the design. If the design covers the range correctly but outputs change little, the model is relatively insensitive to that input within the studied domain.
+
+```{r lhs-design-summary}
+design_summary <- data.frame(samples=nrow(uncertainty_design),factors=nrow(input_spec),seed=as.integer(params$seed),expected_min=vapply(input_spec$factor,function(nm)min(uncertainty_design[[nm]]),numeric(1)),expected_max=vapply(input_spec$factor,function(nm)max(uncertainty_design[[nm]]),numeric(1)),row.names=input_spec$factor)
+show_table(design_summary,100)
+```
+
+# Output extraction
+
+The table explicitly defines each variable, unit, and temporal operation. Soil carbon is a **final stock**, so the last valid value on the final date is used. N2O-N, CO2-C, and nitrate leaching are **flows**, so daily values are summed over the rotation. The `daily` table is the primary source and `sqlite__DailyReport` is the fallback.
+
+**How to read the units.** `N2O_total_kgNha` is kg of N contained in N2O per hectare, not kg of N2O and not CO2 equivalent. `CO2C_total_kgCha` is kg of C contained in CO2. `LeachNO3_kgNha` is nitrate-N leaving the simulated profile, not a direct groundwater-concentration measurement.
+
+**How to read the units.** `N2O_total_kgNha` is kg of N contained in N2O per hectare, not kg of N2O and not CO2 equivalent. `CO2C_total_kgCha` is kg of C contained in CO2. `LeachNO3_kgNha` is nitrate-N leaving the simulated profile, not a direct groundwater-concentration measurement.
+
+```{r environmental-output-contract}
+environmental_output_contract <- data.frame(
+ output=c("Final total soil C","Cumulative N2O-N","Cumulative CO2-C","Cumulative nitrate-N leaching"),
+ APSIMx_variable=c("SoilCtot_kgCha","N2O_total_kgNha","CO2C_total_kgCha","LeachNO3_kgNha"),
+ temporal_operation=c("Last finite value on final simulated date","Sum of all finite daily values","Sum of all finite daily values","Sum of all finite daily values"),
+ unit=c("kg C/ha","kg N/ha","kg C/ha","kg N/ha"),
+ preferred_table="daily",fallback_table="sqlite__DailyReport",stringsAsFactors=FALSE)
+show_table(environmental_output_contract,20)
+```
+
+The block reads CSV and SQLite DataStore outputs from APSIMx, identifies the daily table, converts the four columns to numeric values, and locates the final date. A run is considered available only when at least one complete finite row exists. This prevents a real zero from being treated as missing.
+
+The block reads CSV and SQLite DataStore outputs from APSIMx, identifies the daily table, converts the four columns to numeric values, and locates the final date. A run is considered available only when at least one complete finite row exists. This prevents a real zero from being treated as missing.
+
+```{r output-functions, include=FALSE}
+read_csv_if_present<-function(path) { if(is.null(path)||!length(path)||is.na(path)||!nzchar(path)||!file.exists(path)) return(NULL); utils::read.csv(path,stringsAsFactors=FALSE,check.names=FALSE) }
+read_all_tables<-function(result) {
+ tr<-result$tradeoffs; tables<-list(control=read_csv_if_present(tr$control_csv_path),daily=read_csv_if_present(tr$daily_csv_path),crop_summary=read_csv_if_present(tr$crop_summary_path),timeseries=read_csv_if_present(tr$timeseries_csv),harvest=read_csv_if_present(tr$harvest_csv))
+ if(has_rsqlite&&!is.null(tr$datastore_path)&&file.exists(tr$datastore_path)) { con<-DBI::dbConnect(RSQLite::SQLite(),tr$datastore_path); on.exit(DBI::dbDisconnect(con),add=TRUE); for(nm in DBI::dbListTables(con)) { q<-tryCatch(DBI::dbReadTable(con,nm),error=function(e)NULL); if(is.data.frame(q)&&nrow(q)) tables[[paste0("sqlite__",nm)]]<-q } }
+ Filter(function(z)is.data.frame(z)&&nrow(z),tables)
+}
+numeric_like<-function(x) { if(is.numeric(x)) return(as.numeric(x)); suppressWarnings(as.numeric(gsub(",",".",trimws(as.character(x)),fixed=TRUE))) }
+safe_date<-function(x) { if(inherits(x,"Date")) return(x); x<-trimws(as.character(x)); out<-rep(as.Date(NA),length(x)); for(fmt in c("%Y-%m-%d","%Y-%m-%d %H:%M:%S","%Y-%m-%dT%H:%M:%S","%d/%m/%Y","%m/%d/%Y","%d-%m-%Y","%d-%b-%Y")) { m<-is.na(out)&!is.na(x)&nzchar(x); if(any(m)) out[m]<-as.Date(x[m],format=fmt) }; out }
+select_daily_table<-function(tables) { for(nm in c("daily","sqlite__DailyReport")) if(nm%in%names(tables)) return(list(name=nm,data=tables[[nm]])); NULL }
+extract_environmental_outputs<-function(tables) {
+ x<-select_daily_table(tables); if(is.null(x)) return(list(available=FALSE,reason="Daily output table is missing"))
+ d<-x$data; required<-c("SoilCtot_kgCha","N2O_total_kgNha","CO2C_total_kgCha","LeachNO3_kgNha")
+ if(!all(required%in%names(d))) return(list(available=FALSE,reason=paste("Missing columns:",paste(setdiff(required,names(d)),collapse=", "))))
+ date_col<-c("Clock.Today","Date","date"); date_col<-date_col[date_col%in%names(d)]; dates<-if(length(date_col)) safe_date(d[[date_col[1]]]) else rep(as.Date(NA),nrow(d))
+ vals<-lapply(required,function(nm) numeric_like(d[[nm]])); names(vals)<-required
+ complete<-Reduce(`&`,lapply(vals,is.finite)); if(!any(complete)) return(list(available=FALSE,reason="Environmental outputs contain no complete finite rows"))
+ idx<-which(complete); last_idx<-if(any(!is.na(dates[idx]))) idx[which.max(dates[idx])] else tail(idx,1)
+ list(available=TRUE,source_table=x$name,final_date=if(!is.na(dates[last_idx])) as.character(dates[last_idx]) else NA_character_,soil_c_final=vals$SoilCtot_kgCha[last_idx],n2o_cumulative=sum(vals$N2O_total_kgNha[is.finite(vals$N2O_total_kgNha)],na.rm=TRUE),co2c_cumulative=sum(vals$CO2C_total_kgCha[is.finite(vals$CO2C_total_kgCha)],na.rm=TRUE),leach_no3_cumulative=sum(vals$LeachNO3_kgNha[is.finite(vals$LeachNO3_kgNha)],na.rm=TRUE),reason="")
+}
+```
+
+# Computation time and workload
+
+The planned APSIMx workload is `1 + 20 + samples`: one baseline, 20 one-at-a-time preflight runs, and the LHS ensemble. Bootstrap replicates do not launch APSIMx. Before model execution, a reliable clock-time estimate is not assumed because duration depends on processor, storage, .NET warm-up, and DataStore performance. After execution, the report calculates measured run time and an empirical projection based on the observed mean seconds per run. The smoke profile is diagnostic only; the full profile is the basis for scientific interpretation.
+
+```{r planned-computation-time}
+planned_APSIMx_runs <- 1L + nrow(input_spec) + nrow(uncertainty_design)
+planned_workload <- data.frame(
+  analysis_profile = profile,
+  baseline_runs = 1L,
+  preflight_runs = nrow(input_spec),
+  lhs_runs = nrow(uncertainty_design),
+  planned_APSIMx_runs = planned_APSIMx_runs,
+  bootstrap_replicates = as.integer(params$bootstrap_replicates),
+  note = "Bootstrap replicates do not add APSIMx runs",
+  stringsAsFactors = FALSE
+)
+show_table(planned_workload, 20)
+```
+
+# APSIMx runner
+
+### Execution plan
+
+The table shows the planned number of executions and their output locations. Execution is sequential and reuse is disabled. With 20 inputs, the smoke profile plans 51 runs (1 baseline, 20 preflight, and 30 scenarios), while the full profile plans 521 runs (1 + 20 + 500).
+
+For presentation, this table documents computational cost and makes clear that all four outputs are obtained from the same run, not from four separate experiments.
+
+```{r runner-settings}
+runner_plan <- data.frame(item=c("Analysis profile","Samples","Bootstrap replicates","Execution mode","Previous-run reuse","Baseline runs","Input preflight runs","LHS ensemble runs","Maximum planned APSIMx runs","Execution root","Analysis root","Log root"),value=c(profile,params$samples,params$bootstrap_replicates,"Sequential fresh runs","Disabled",1L,nrow(input_spec),nrow(uncertainty_design),1L+nrow(input_spec)+nrow(uncertainty_design),execution_root,analysis_root,log_root),stringsAsFactors=FALSE)
+show_table(runner_plan,30)
+```
+
+### What the APSIMx runner does
+
+For each scenario, the runner creates an independent directory, writes request and configuration JSON files, starts `Spacing.Tool2` through `dotnet`, and reads the result. It retains exit status, logs, duration, and any failure reason. The code is hidden, but these metadata remain available in the diagnostic tables.
+
+```{r runner, include=FALSE}
+run_uncertainty<-function(run_index,scenario,run_kind="sample") {
+ code<-if(run_kind=="baseline") "b" else if(run_kind=="preflight") sprintf("p%02d",run_index) else sprintf("r%03d",run_index)
+ run_id<-paste0("u",code); run_dir<-file.path(execution_root,run_id); output_dir<-file.path(run_dir,"o"); weather_dir<-file.path(run_dir,"w"); dir.create(output_dir,recursive=TRUE,showWarnings=FALSE); dir.create(weather_dir,recursive=TRUE,showWarnings=FALSE)
+ request_path<-file.path(run_dir,"q.json"); config_path<-file.path(run_dir,"c.json"); result_path<-file.path(output_dir,"r.json"); manifest_path<-file.path(output_dir,"m.json"); stdout_path<-file.path(output_dir,"out.log"); stderr_path<-file.path(output_dir,"err.log")
+ request<-list(id="u5env",name="U5env",run_id=run_id,metadata=list(source="R Markdown",method="constrained Latin hypercube input uncertainty",design_id=design_id,run_kind=run_kind,run_index=as.character(run_index)),mock=isTRUE(USE_MOCK_WEATHER),calibrate=FALSE,lat=LATITUDE,lon=LONGITUDE,cell_id=CELL_ID,start_year=START_YEAR,end_year=END_YEAR,soil_profile=scenario$soil_profile,result_file=normalize_win(result_path,FALSE),manifest_file=normalize_win(manifest_path,FALSE),crops=scenario$crops,cycles=5L)
+ config<-list(DbApiBaseUrl="http://localhost:8000/api/v1",DbApiKey="",TempWeatherDir=normalize_win(weather_dir,FALSE),OutputDir=normalize_win(output_dir,FALSE),StartYear=START_YEAR,EndYear=END_YEAR,MaxParallelism=1L)
+ jsonlite::write_json(request,request_path,auto_unbox=TRUE,pretty=TRUE,digits=NA,null="null"); jsonlite::write_json(config,config_path,auto_unbox=TRUE,pretty=TRUE,digits=NA,null="null")
+ args<-c(shQuote(normalize_win(dll_path,TRUE)),"--config",shQuote(normalize_win(config_path,TRUE)),"--request",shQuote(normalize_win(request_path,TRUE)),"--result",shQuote(normalize_win(result_path,FALSE)),"--manifest",shQuote(normalize_win(manifest_path,FALSE))); if(USE_MOCK_WEATHER) args<-c(args,"--mock")
+ started<-Sys.time(); exit_status<-system2("dotnet",args=args,stdout=stdout_path,stderr=stderr_path,wait=TRUE); elapsed<-as.numeric(difftime(Sys.time(),started,units="secs")); stderr_text<-if(file.exists(stderr_path)) paste(readLines(stderr_path,warn=FALSE),collapse="\\n") else ""
+ result<-if(identical(as.integer(exit_status),0L)&&file.exists(result_path)) tryCatch(jsonlite::read_json(result_path,simplifyVector=TRUE),error=function(e)NULL) else NULL
+ model_success<-!is.null(result)&&isTRUE(result$success)
+ if(!model_success) return(list(model_success=FALSE,outputs_available=FALSE,reason=if(nzchar(stderr_text)) stderr_text else paste("Spacing.Tool2 exit code",exit_status),exit_status=as.integer(exit_status),stderr_path=stderr_path,elapsed_seconds=elapsed))
+ env<-extract_environmental_outputs(read_all_tables(result)); c(list(model_success=TRUE,outputs_available=isTRUE(env$available),exit_status=as.integer(exit_status),stderr_path=stderr_path,elapsed_seconds=elapsed),env)
+}
+```
+
+# Baseline and input preflight
+
+### Why baseline and preflight precede the ensemble
+
+The baseline verifies that the five-year rotation produces all four outputs. Preflight then changes one input at a time and checks both physical validity and APSIMx completion. LHS runs begin only after all 16 inputs pass. This avoids discovering after many hours that an input was not transferred correctly.
+
+```{r baseline-preflight, include=FALSE, eval=params$execute_runs}
+baseline_scenario<-list(soil_profile=soil_profile,crops=base_crops); baseline<-run_uncertainty(0L,baseline_scenario,"baseline")
+baseline_row<-data.frame(model_success=baseline$model_success,outputs_available=baseline$outputs_available,soil_c_final=scalar_num(baseline$soil_c_final),n2o_cumulative=scalar_num(baseline$n2o_cumulative),co2c_cumulative=scalar_num(baseline$co2c_cumulative),leach_no3_cumulative=scalar_num(baseline$leach_no3_cumulative),final_date=scalar_chr(baseline$final_date),reason=scalar_chr(baseline$reason),stringsAsFactors=FALSE)
+write.csv(baseline_row,file.path(analysis_root,"baseline_environmental_outputs.csv"),row.names=FALSE)
+
+preflight<-vector("list",nrow(input_spec))
+for(i in seq_len(nrow(input_spec))) { x<-as.list(stats::setNames(rep(1,nrow(input_spec)),input_spec$factor)); x$oc_gradient<-0; x$ph_shift<-0; x$irrigation_threshold_shift<-0; x$irrigation_target_shift<-0; x[[input_spec$factor[i]]]<-input_spec$lower[i]+.75*(input_spec$upper[i]-input_spec$lower[i]); z<-perturb_scenario(x); ck<-validate_scenario(z); rr<-if(ck$ok) run_uncertainty(i,z,"preflight") else list(model_success=FALSE,outputs_available=FALSE,reason=ck$reason,exit_status=NA_integer_,stderr_path="",elapsed_seconds=0); accepted<-ck$ok&&isTRUE(rr$model_success)&&isTRUE(rr$outputs_available); preflight[[i]]<-data.frame(factor=input_spec$factor[i],group=input_spec$group[i],tested_value=x[[input_spec$factor[i]]],scenario_valid=ck$ok,model_success=isTRUE(rr$model_success),outputs_available=isTRUE(rr$outputs_available),accepted=accepted,reason=if(accepted) "" else scalar_chr(rr$reason,ck$reason),exit_status=scalar_num(rr$exit_status),stderr_path=scalar_chr(rr$stderr_path),elapsed_seconds=scalar_num(rr$elapsed_seconds),stringsAsFactors=FALSE) }
+preflight_audit<-do.call(rbind,preflight); write.csv(preflight_audit,file.path(analysis_root,"input_preflight_audit.csv"),row.names=FALSE)
+if(!all(preflight_audit$accepted)) stop("Input preflight rejected one or more factors. See input_preflight_audit.csv. LHS runs were not started.")
+```
+
+## Baseline environmental outputs
+
+### How to read the environmental baseline
+
+The row is the unperturbed reference. `soil_c_final` is the stock on the final date; the other three values are five-year cumulative flows. `model_success` and `outputs_available` must be `TRUE`, and `reason` must be empty. The baseline provides context and validation, but input importance is calculated from the full ensemble rather than simple differences from baseline.
+
+```{r baseline-results}
+show_table(baseline_row,20)
+```
+The row is the unperturbed reference. `soil_c_final` is the stock on the final date; the other three values are five-year cumulative flows. `model_success` and `outputs_available` must be `TRUE`, and `reason` must be empty. The baseline provides context and validation, but input importance is calculated from the full ensemble rather than simple differences from baseline.
+## Input preflight audit
+
+### How to read the input audit
+
+Each row is one factor tested in isolation. `scenario_valid` checks constraints, `model_success` checks APSIMx execution, `outputs_available` checks extraction of all four outputs, and `accepted` is the final decision. All rows must be accepted. Otherwise, `reason`, `exit_status`, and `stderr_path` indicate where to investigate.
+
+```{r preflight-results}
+
+```
+
+# Execute uncertainty ensemble
+
+### What happens during the LHS simulations
+
+For each LHS row, the block reconstructs soil and management, validates the profile, runs APSIMx, and records the four outputs. It saves `uncertainty_runs.csv`, the profile audit, and a separate file for failed runs. In the smoke profile, at least 20 complete runs are required; the full profile is intended for substantially higher completion and must be evaluated with the completion audit.
+
+```{r execute-ensemble, include=FALSE, eval=params$execute_runs}
+run_rows<-vector("list",nrow(uncertainty_design)); profile_audit<-vector("list",nrow(uncertainty_design))
+for(i in seq_len(nrow(uncertainty_design))) {
+ x<-as.list(uncertainty_design[i,input_spec$factor,drop=FALSE]); z<-perturb_scenario(x); ck<-validate_scenario(z)
+ profile_audit[[i]]<-data.frame(sample_id=i,valid=ck$ok,reason=ck$reason,min_ll15=min(vapply(z$soil_profile$Layers,`[[`,numeric(1),"LL15")),max_sat=max(vapply(z$soil_profile$Layers,`[[`,numeric(1),"SAT")),min_oc=min(vapply(z$soil_profile$Layers,`[[`,numeric(1),"OC")),max_bd=max(vapply(z$soil_profile$Layers,`[[`,numeric(1),"BD")),sat_clipped_layers=z$sat_clipped_layers,stringsAsFactors=FALSE)
+ rr<-if(ck$ok) run_uncertainty(i,z,"sample") else list(model_success=FALSE,outputs_available=FALSE,reason=ck$reason,exit_status=NA_integer_,stderr_path="",elapsed_seconds=0)
+ run_rows[[i]]<-data.frame(sample_id=i,model_success=isTRUE(rr$model_success),outputs_available=isTRUE(rr$outputs_available),soil_c_final_kgCha=scalar_num(rr$soil_c_final),n2o_cumulative_kgNha=scalar_num(rr$n2o_cumulative),co2c_cumulative_kgCha=scalar_num(rr$co2c_cumulative),leach_no3_cumulative_kgNha=scalar_num(rr$leach_no3_cumulative),final_date=scalar_chr(rr$final_date),source_table=scalar_chr(rr$source_table),reason=scalar_chr(rr$reason),exit_status=scalar_num(rr$exit_status),stderr_path=scalar_chr(rr$stderr_path),elapsed_seconds=scalar_num(rr$elapsed_seconds),stringsAsFactors=FALSE)
+}
+uncertainty_runs<-do.call(rbind,run_rows); profiles<-do.call(rbind,profile_audit); results<-merge(uncertainty_design,uncertainty_runs,by="sample_id",sort=FALSE)
+write.csv(profiles,file.path(analysis_root,"input_profiles_audit.csv"),row.names=FALSE); write.csv(results,file.path(analysis_root,"uncertainty_runs.csv"),row.names=FALSE); write.csv(results[!results$model_success|!results$outputs_available,,drop=FALSE],file.path(analysis_root,"failed_uncertainty_runs.csv"),row.names=FALSE)
+complete<-results$model_success&results$outputs_available&is.finite(results$soil_c_final_kgCha)&is.finite(results$n2o_cumulative_kgNha)&is.finite(results$co2c_cumulative_kgCha)&is.finite(results$leach_no3_cumulative_kgNha)
+if(sum(complete)<20L) stop("Too few complete uncertainty runs: ",sum(complete),"/",nrow(results),". See failed_uncertainty_runs.csv")
+analysis_data<-results[complete,,drop=FALSE]
+```
+
+## Ensemble execution results
+
+### How to read ensemble status
+
+`requested` è il numero pianificato; `model_success` conta le run concluse dal modello; `outputs_available` quelle con le quattro variabili leggibili; `complete` quelle utilizzabili nell'analisi; `failed` è la differenza. Durata media e ore totali aiutano a documentare il costo computazionale. Idealmente `requested`, `model_success`, `outputs_available` e `complete` coincidono.
+
+```{r ensemble-execution-results}
+ensemble_status <- data.frame(requested=nrow(results),model_success=sum(results$model_success),outputs_available=sum(results$outputs_available),complete=sum(complete),failed=sum(!complete),mean_elapsed_seconds=mean(results$elapsed_seconds,na.rm=TRUE),total_elapsed_hours=sum(results$elapsed_seconds,na.rm=TRUE)/3600,stringsAsFactors=FALSE)
+show_table(ensemble_status,20)
+```
+
+### Measured and projected computation time
+
+The table below uses the elapsed seconds recorded by the runner. `measured_APSIMx_hours` includes the baseline, preflight, and LHS executions available in this document. `projected_full_521_hours` estimates a 521-run full analysis from the observed mean run duration on the current workstation; it is an empirical planning value, not a guarantee.
+
+```{r measured-computation-time}
+all_elapsed_seconds <- c(
+  scalar_num(baseline$elapsed_seconds, NA_real_),
+  preflight_audit$elapsed_seconds,
+  uncertainty_runs$elapsed_seconds
+)
+all_elapsed_seconds <- all_elapsed_seconds[is.finite(all_elapsed_seconds)]
+observed_run_count <- length(all_elapsed_seconds)
+mean_seconds_per_run <- if (observed_run_count) mean(all_elapsed_seconds) else NA_real_
+measured_APSIMx_hours <- if (observed_run_count) sum(all_elapsed_seconds) / 3600 else NA_real_
+projected_full_521_hours <- if (is.finite(mean_seconds_per_run)) 521 * mean_seconds_per_run / 3600 else NA_real_
+time_estimate <- data.frame(
+  analysis_profile = profile,
+  observed_APSIMx_runs = observed_run_count,
+  mean_seconds_per_run = mean_seconds_per_run,
+  measured_APSIMx_hours = measured_APSIMx_hours,
+  projected_full_521_hours = projected_full_521_hours,
+  bootstrap_replicates = as.integer(params$bootstrap_replicates),
+  stringsAsFactors = FALSE
+)
+show_table(time_estimate, 20)
+write.csv(time_estimate,file.path(analysis_root,"computation_time_estimate.csv"),row.names=FALSE)
+```
+
+## Incomplete or failed scenarios
+
+### How to read problematic runs
+
+This table shows only incomplete or failed scenarios. If empty, all runs are usable. Otherwise, `reason` distinguishes model errors from missing outputs, `exit_status` records the exit code, and `stderr_path` points to the relevant log. Distributions and rankings should not be interpreted before determining whether failures are random or concentrated in part of the domain.
+
+```{r ensemble-failures}
+failed_preview <- results[!complete,c("sample_id","model_success","outputs_available","reason","exit_status","stderr_path","elapsed_seconds"),drop=FALSE]
+show_table(failed_preview,params$show_rows)
+```
+
+## Extracted environmental responses
+
+### How to read the output preview
+
+Each row is a complete LHS scenario. The four environmental columns are already in analysis form: final stock for Soil C and five-year cumulative values for the three flows. `final_date` should match the rotation end and `source_table` records the table actually used. The preview helps identify constant values, unexpected scales, or duplication.
+
+```{r ensemble-response-preview}
+response_preview <- analysis_data[,c("sample_id","soil_c_final_kgCha","n2o_cumulative_kgNha","co2c_cumulative_kgCha","leach_no3_cumulative_kgNha","final_date","source_table"),drop=FALSE]
+show_table(response_preview,params$show_rows)
+```
+
+# Uncertainty summaries and rankings
+
+### How uncertainty and importance are estimated
+
+The functions calculate descriptive statistics, PRCC, and standardised regression coefficients. PRCC uses ranks and measures the monotonic association between one input and one output after controlling for the other inputs. Bootstrap resampling is used to build the 95% interval.
+
+```{r analysis-functions, include=FALSE}
+output_names<-c("soil_c_final_kgCha","n2o_cumulative_kgNha","co2c_cumulative_kgCha","leach_no3_cumulative_kgNha")
+summary_one<-function(y,nm) data.frame(output=nm,n=length(y),mean=mean(y),sd=sd(y),cv=sd(y)/abs(mean(y)),min=min(y),p05=quantile(y,.05),p25=quantile(y,.25),median=median(y),p75=quantile(y,.75),p95=quantile(y,.95),max=max(y),row.names=NULL)
+prcc_one<-function(X,y) {
+ RX<-apply(X,2,rank,ties.method="average"); ry<-rank(y,ties.method="average"); out<-numeric(ncol(RX))
+ for(j in seq_len(ncol(RX))) { others<-setdiff(seq_len(ncol(RX)),j); rxres<-residuals(lm(RX[,j]~RX[,others,drop=FALSE])); ryres<-residuals(lm(ry~RX[,others,drop=FALSE])); out[j]<-cor(rxres,ryres) }
+ out
+}
+src_one<-function(X,y) { Z<-as.data.frame(scale(X)); fit<-lm(as.numeric(scale(y))~.,data=Z); unname(coef(fit)[-1]) }
+bootstrap_prcc<-function(X,y,B,seed) { set.seed(seed); ans<-matrix(NA_real_,B,ncol(X)); for(b in seq_len(B)) { ii<-sample.int(nrow(X),replace=TRUE); ans[b,]<-tryCatch(prcc_one(X[ii,,drop=FALSE],y[ii]),error=function(e)rep(NA_real_,ncol(X))) }; ans }
+```
+
+### How the four rankings are produced
+
+The block analyses final Soil C, N2O-N, CO2-C, and nitrate leaching separately. For each output it calculates PRCC, bootstrap interval, standardised coefficient, and a rank based on absolute PRCC. A positive PRCC indicates that output tends to increase with the input; a negative PRCC indicates a decrease. Absolute value describes strength, while sign describes direction.
+
+```{r calculate-rankings, include=FALSE}
+X<-as.matrix(analysis_data[,input_spec$factor,drop=FALSE]); summaries<-do.call(rbind,lapply(output_names,function(nm) summary_one(analysis_data[[nm]],nm)))
+rankings<-list()
+for(o in seq_along(output_names)) { nm<-output_names[o]; y<-analysis_data[[nm]]; pr<-prcc_one(X,y); sr<-src_one(X,y); boot<-bootstrap_prcc(X,y,as.integer(params$bootstrap_replicates),as.integer(params$seed)+o); tab<-data.frame(output=nm,factor=input_spec$factor,group=input_spec$group,prcc=pr,prcc_low=apply(boot,2,quantile,.025,na.rm=TRUE),prcc_high=apply(boot,2,quantile,.975,na.rm=TRUE),standardized_regression=sr,stringsAsFactors=FALSE); tab$importance_rank<-rank(-abs(tab$prcc),ties.method="min"); rankings[[nm]]<-tab[order(tab$importance_rank),] }
+importance<-do.call(rbind,rankings)
+write.csv(summaries,file.path(analysis_root,"environmental_output_summary.csv"),row.names=FALSE); write.csv(importance,file.path(analysis_root,"input_importance_ranking.csv"),row.names=FALSE)
+for(nm in output_names) write.csv(rankings[[nm]],file.path(analysis_root,paste0("prcc_",nm,".csv")),row.names=FALSE)
+```
+
+## Environmental output distributions
+
+### How to read output uncertainty
+
+For each response, the table reports run count, mean, standard deviation, coefficient of variation, and percentiles. `p05-p95` contains the central 90% of scenarios and is generally more informative than the minimum-maximum range, which can be driven by a few extreme cases. The coefficient of variation supports relative comparison across outputs but must be interpreted cautiously when the mean is near zero.
+
+```{r output-summary}
+show_table(summaries,100)
+```
+
+### How to read the histograms
+
+Each panel uses its own horizontal scale. Bar height is the number of scenarios in each bin, not an absolute probability and not a time series. Narrow distributions indicate limited propagation of input uncertainty; long tails, asymmetry, or multiple peaks suggest nonlinear responses, thresholds, or different input combinations. Panel widths should not be compared without considering units and scales.
+
+```{r distribution-plots, fig.height=8}
+long<-do.call(rbind,lapply(output_names,function(nm)data.frame(output=nm,value=analysis_data[[nm]])))
+ggplot(long,aes(value))+geom_histogram(bins=30,fill="#2E75B6",colour="white")+facet_wrap(~output,scales="free",ncol=2)+theme_minimal()+labs(x=NULL,y="Frequency",title="Five-year environmental output uncertainty")
+```
+
+## Input importance by environmental output
+
+### How to read the importance table
+
+Rows are ordered within each output. `prcc` describes direction and strength, `prcc_low` and `prcc_high` give the 95% bootstrap interval, `standardized_regression` provides a parametric cross-check, and `importance_rank` orders by `|PRCC|`. Evidence for a factor is stronger when PRCC and regression have the same sign and the PRCC interval does not cross zero. The ranking does not establish causality outside the sampled domain.
+
+```{r importance-table}
+show_table(importance[order(importance$output,importance$importance_rank),],200)
+```
+
+### How to read the PRCC plots
+
+Each point is an input PRCC and the vertical bar is its 95% bootstrap interval. The zero line separates positive and negative effects. Points far from zero with narrow intervals indicate dominant, stable factors; intervals crossing zero indicate weak or unresolved effects at the selected sample size. Input axes differ among panels, but the PRCC scale is common from -1 to 1.
+
+```{r importance-plots, fig.height=10}
+plot_data<-importance[importance$importance_rank<=10,]
+ggplot(plot_data,aes(x=reorder(factor,abs(prcc)),y=prcc,ymin=prcc_low,ymax=prcc_high,colour=group))+geom_hline(yintercept=0,colour="grey70")+geom_pointrange()+coord_flip()+facet_wrap(~output,scales="free_y",ncol=2)+theme_minimal()+labs(x=NULL,y="PRCC with 95% bootstrap interval",title="Input uncertainty ranking")
+```
+
+# Completion status
+
+### How to read the final completion check
+
+The table summarises requested, complete, and failed samples and the total number of APSIMx executions. This check should be shown before scientific results: a ranking is credible only when the planned ensemble is substantially complete and exclusions are documented. `uncertainty_completion_status.csv` stores the same summary.
+
+```{r completion-status}
+status<-data.frame(analysis_profile=profile,requested_samples=nrow(uncertainty_design),bootstrap_replicates=as.integer(params$bootstrap_replicates),complete_samples=sum(complete),failed_samples=sum(!complete),baseline_runs=1L,preflight_runs=nrow(input_spec),total_APSIMx_runs=1L+nrow(input_spec)+nrow(uncertainty_design),stringsAsFactors=FALSE)
+show_table(status,20)
+write.csv(status,file.path(analysis_root,"uncertainty_completion_status.csv"),row.names=FALSE)
+```
+
+# Interpretation notes
+
+- `SoilCtot_kgCha` is selected only at the last simulated date.
+- N2O-N, CO2-C and nitrate leaching are summed across all daily records of the five-year rotation.
+- `LeachNO3_kgNha` is nitrate-N leaving the simulated soil profile, not a direct prediction of nitrate reaching the groundwater table.
+- The four outputs retain their native APSIMx units and are ranked separately.
+- The synthetic demonstration soil profile remains the baseline. Results quantify uncertainty around this scenario and must not be interpreted as site-calibrated uncertainty without observed input distributions.
+
+
+# Output locations
+
+The table records the smoke or full profile, the short execution directory, the durable result directory, and the runtime provenance file. Keep the Rmd, `runtime_configuration.csv`, preflight audit, run inventory, output summary, and PRCC rankings together.
+
+```{r output-locations}
+data.frame(analysis_profile=profile,execution_directory=execution_root,analysis_directory=analysis_root,log_directory=log_root,runtime_configuration=file.path(log_root,"runtime_configuration.csv"),stringsAsFactors=FALSE)
+```
+
+
+# Total document elapsed time
+
+```{r total-document-time}
+TOTAL_DOCUMENT_ELAPSED_SECONDS <- as.numeric(
+  difftime(Sys.time(), DOCUMENT_STARTED_AT, units = "secs")
+)
+document_time <- data.frame(
+  analysis_profile = profile,
+  total_render_seconds = TOTAL_DOCUMENT_ELAPSED_SECONDS,
+  total_render_minutes = TOTAL_DOCUMENT_ELAPSED_SECONDS / 60,
+  total_render_hours = TOTAL_DOCUMENT_ELAPSED_SECONDS / 3600,
+  stringsAsFactors = FALSE
+)
+document_time
+write.csv(document_time,file.path(analysis_root,"document_elapsed_time.csv"),row.names=FALSE)
+```

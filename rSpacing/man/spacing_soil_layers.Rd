@@ -1,1 +1,0 @@
-\name{spacing_soil_layers}\alias{spacing_soil_layers}\title{Resolve soil-layer geometry}\usage{spacing_soil_layers(result, n_layers = NULL, thickness = NULL)}\description{Returns the single cumulative-depth geometry used by individual-layer and soil-profile plots.}\value{A data frame of layer thicknesses and cumulative depth intervals.}

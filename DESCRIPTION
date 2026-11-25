@@ -1,0 +1,54 @@
+Package: rSpacing
+Type: Package
+Title: Reproducible R Interface to Spacing.Tool2 and APSIM Next Generation
+Version: 0.10.09
+Authors@R: c(
+    person("Maurizio", "Bagnara", role = c("aut", "cre"),
+           email = "maurizio.bagnara@crea.gov.it"),
+    person("Microsoft 365 Copilot", role = "ctb")
+  )
+Description: Provides a validated and reproducible R interface to the custom
+    Spacing.Tool2 workflow and APSIM Next Generation. The package builds command
+    line requests, executes the C# project, captures logs and provenance,
+    discovers generated APSIMX, SQLite, weather and CSV files, and imports
+    model outputs into structured R objects. Native result accessors, metadata
+    inventories, units lookup, variable classification, and ggplot2-based
+    visualisation support daily, annual, and meteorological outputs. Static
+    and optional interactive maps identify the coordinates of individual or
+    multiple simulations. Complete scenarios (soil profile, rotations with
+    repeated crops, cover crops, intercrops and perennials, sowing rules,
+    fertilisation, irrigation, tillage, organic inputs and residue
+    management) are written as requests for Spacing.Tool2 0.09.10 or later.
+    Validated run specifications support calibration and sensitivity
+    workflows.
+License: GPL-3
+Encoding: UTF-8
+Language: en
+Depends: R (>= 4.1.0)
+Imports:
+    DBI,
+    RSQLite,
+    jsonlite,
+    processx,
+    fs,
+    digest,
+    ggplot2,
+    rlang,
+    patchwork,
+    stats,
+    utils
+Suggests:
+    knitr,
+    rmarkdown,
+    testthat (>= 3.0.0),
+    roxygen2,
+    covr,
+    rcmdcheck,
+    apsimx,
+    leaflet,
+    maps
+Config/testthat/edition: 3
+URL: https://github.com/GeoModelLab/rSpacing
+BugReports: https://github.com/GeoModelLab/rSpacing/issues
+Config/roxygen2/version: 8.1.1
+VignetteBuilder: knitr

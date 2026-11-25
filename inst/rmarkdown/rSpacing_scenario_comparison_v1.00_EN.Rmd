@@ -1,0 +1,504 @@
+---
+title: "rSpacing/APSIMx: management scenarios on the standard rotation - yield, soil C, nitrate leaching and greenhouse gases, v1.00 EN"
+author: "Maurizio Bagnara"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    df_print: paged
+params:
+  workspace_root: ".."
+  output_subdir: "scenario_comparison_v100"
+  build_configuration: "Debug"
+  target_framework: "net8.0"
+  tool2_dll: null
+  rspacing_lib: null
+  rerun: true
+  gwp_n2o: 273
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 5.5, dpi = 110)
+DOCUMENT_STARTED_AT <- Sys.time()
+```
+
+# Purpose
+
+This document compares nine management scenarios on the standard rotation of the rSpacing workflows: Soybean Generic_MG1, then winter wheat Claire, then maize B_130, at Gualtieri (RE), 2020-2024. Every scenario changes **one** practice from the baseline. The comparison covers:
+
+- **yield** of each crop;
+- **soil organic carbon**, the change over the five years for the whole profile and for 0-30 cm;
+- **nitrate leaching** below the profile;
+- **greenhouse gases**: soil N2O, soil CO2 from decomposition, and a net soil balance in CO2 equivalents.
+
+The scenarios are written with the rSpacing scenario API and run with Spacing.Tool2 (>= 0.09.10). The companion **cookbook** explains every option used here. Weather is the Tool2 mock weather and the soil is the demonstration silt loam. The results show how the scenarios differ from each other under these conditions; they are not predictions for a real farm.
+
+**Requirements:**
+
+- rSpacing >= 0.10.9 (workspace step T03: `source("install_rspacing.R")`);
+- Spacing.Tool2 >= 0.09.10, built.
+
+With `params$rerun = false` the document reuses the runs saved by the last render.
+
+# Setup
+
+```{r workspace}
+if (!is.null(params$rspacing_lib) && nzchar(params$rspacing_lib))
+  .libPaths(c(params$rspacing_lib, .libPaths()))
+if (!requireNamespace("rSpacing", quietly = TRUE) || packageVersion("rSpacing") < "0.10.9")
+  stop("rSpacing >= 0.10.9 is required: run source(\"install_rspacing.R\") in the workspace root (step T03)")
+library(rSpacing)
+library(ggplot2)
+
+WORKSPACE_ROOT <- normalizePath(params$workspace_root, winslash = "/", mustWork = TRUE)
+SPACING_ROOT   <- file.path(WORKSPACE_ROOT, "apsim")
+WORK_ROOT      <- file.path(WORKSPACE_ROOT, "runs", params$output_subdir)
+OUTPUT_ROOT    <- file.path(WORKSPACE_ROOT, "results", params$output_subdir)
+dir.create(WORK_ROOT, recursive = TRUE, showWarnings = FALSE)
+dir.create(OUTPUT_ROOT, recursive = TRUE, showWarnings = FALSE)
+
+dll_candidates <- if (!is.null(params$tool2_dll) && nzchar(params$tool2_dll)) params$tool2_dll else
+  file.path(SPACING_ROOT, "src", "Spacing.Tool2", "bin",
+            unique(c(params$build_configuration, "Debug", "Release")),
+            params$target_framework, "spacing-tool2.dll")
+TOOL2_DLL <- dll_candidates[file.exists(dll_candidates)][1]
+if (isTRUE(params$rerun)) {
+  if (is.na(TOOL2_DLL)) stop("spacing-tool2.dll not found. Checked: ", paste(dll_candidates, collapse = "; "))
+  if (!nzchar(Sys.which("dotnet"))) stop("dotnet was not found on the PATH")
+}
+
+# Colours (reference data-viz palette): one hue for scenarios, grey for the baseline,
+# a blue (better) / red (worse) diverging pair with a grey midpoint for changes.
+COL_SCENARIO <- "#257de0"; COL_BASE <- "#666666"; COL_TEXT <- "#191919"
+COL_BETTER <- "#1b64be"; COL_WORSE <- "#ec4647"; COL_MID <- "#efefef"
+theme_set(theme_minimal(base_size = 11) +
+          theme(panel.grid.minor = element_blank(), plot.title.position = "plot",
+                strip.text = element_text(face = "bold", hjust = 0)))
+data.frame(item = c("rSpacing", "Tool2 DLL", "runs", "results"),
+           value = c(as.character(packageVersion("rSpacing")),
+                     ifelse(is.na(TOOL2_DLL), "not needed (rerun = false)", TOOL2_DLL), WORK_ROOT, OUTPUT_ROOT))
+```
+
+# The scenarios
+
+## Site, soil and report variables
+
+The soil and the site are the same as in the five-year workflow and recipe 4 of the cookbook.
+
+By default the daily output reports total soil carbon (`SoilCtot_kgCha`, APSIM `Nutrient.TotalC`), which includes fresh organic matter (FOM). That pool jumps when residue or manure is incorporated and decays within months. To follow the stable soil organic carbon, two variables are added with `spacing_report_spec()`. Both are the sum of the humic, microbial and inert pools: one for the whole profile and one for the first two layers (0-30 cm).
+
+```{r site-soil}
+layers <- data.frame(
+  DepthTop    = c(0, 15, 30, 60, 90, 120),  DepthBottom = c(15, 30, 60, 90, 120, 150),
+  BD   = c(1.28, 1.33, 1.39, 1.43, 1.46, 1.49), LL15 = c(.14, .15, .16, .16, .16, .15),
+  DUL  = c(.31, .32, .33, .32, .31, .30),       SAT  = c(.46, .45, .44, .43, .42, .41),
+  SW   = c(.28, .29, .30, .29, .28, .27),       OC   = c(1.45, 1.15, .75, .48, .32, .24),
+  PH   = c(7.2, 7.3, 7.4, 7.5, 7.6, 7.7),       NO3  = c(18, 12, 8, 5, 3.5, 2.5),
+  NH4  = c(2, 1.5, 1, .7, .5, .4),
+  Sand = c(20, 19, 18, 20, 22, 24), Silt = c(58, 59, 57, 54, 52, 50), Clay = c(22, 22, 25, 26, 26, 26))
+soil <- spacing_soil_profile(layers, "GUALTIERI_LOAM_DEMO_001", soil_type = "Silt loam (demo)")
+
+stable_soc <- spacing_report_spec(daily_variables = c(
+  "sum([Nutrient].Humic.C) + sum([Nutrient].Microbial.C) + sum([Nutrient].Inert.C) as SOC_kgCha",
+  "sum([Nutrient].Humic.C[1:2]) + sum([Nutrient].Microbial.C[1:2]) + sum([Nutrient].Inert.C[1:2]) as SOC030_kgCha"))
+```
+
+## One function for the rotation and its variants
+
+`standard_rotation()` returns the three crops of the standard rotation. Each argument changes one practice. The defaults are the baseline used by the five-year, Morris and uncertainty workflows:
+
+- **Wheat:** 30 kg N/ha at sowing, 70 at stem elongation and 50 at flag leaf, as urea, plus 20 kg N/ha of manure. Minimum tillage. Spring irrigation.
+- **Maize:** 50 kg N/ha at sowing, 100 kg N/ha 35 days later and 50 kg N/ha 60 days later, plus 25 kg N/ha of manure. Conventional tillage. Summer irrigation.
+- **Soybean:** no N. No-till. Summer irrigation.
+
+```{r rotation-function}
+standard_rotation <- function(wheat_n = c(30, 70, 50), maize_n = c(50, 100, 50),
+                              manure = c(wheat = 20, maize = 25), irrigated = TRUE,
+                              tillage = c(soybean = "no-till", wheat = "minimum", maize = "conventional"),
+                              wheat_straw_removed = NULL, cover_crop = NULL) {
+  soybean <- spacing_crop("Soybean", "Generic_MG1", c("1-may", "15-jun"), 35, 35, 450,
+    tillage = spacing_tillage(tillage[["soybean"]]),
+    irrigation = spacing_irrigation(irrigated, .45, .80, 30, "15-jun", "31-aug"))
+  wheat <- spacing_crop("Wheat", "Claire", c("10-oct", "20-nov"), 180, 35, 180,
+    fertilisation = spacing_fertilisation(wheat_n[1], list(
+      spacing_fertiliser_application(wheat_n[2], trigger = "Stage", stage = "MaximumSpikeletPrimordia"),
+      spacing_fertiliser_application(wheat_n[3], trigger = "Stage", stage = "FlagLeafAppearance"))),
+    irrigation = spacing_irrigation(irrigated, .35, .70, 25, "1-mar", "31-may"),
+    tillage = spacing_tillage(tillage[["wheat"]]), organic = spacing_organic_n(manure[["wheat"]]),
+    residue_removal = if (!is.null(wheat_straw_removed)) spacing_residue_removal(wheat_straw_removed))
+  maize <- spacing_crop("Maize", "B_130", c("1-apr", "10-may"), 7.5, 50, 750,
+    fertilisation = spacing_fertilisation(maize_n[1], list(
+      spacing_fertiliser_application(maize_n[2], trigger = "DaysAfterSowing", days_after_sowing = 35),
+      spacing_fertiliser_application(maize_n[3], trigger = "DaysAfterSowing", days_after_sowing = 60))),
+    irrigation = spacing_irrigation(irrigated, .50, .85, 35, "1-jun", "31-aug"),
+    tillage = spacing_tillage(tillage[["maize"]]), organic = spacing_organic_n(manure[["maize"]]))
+  if (is.null(cover_crop)) list(soybean, wheat, maize) else list(soybean, wheat, cover_crop, maize)
+}
+```
+
+## The nine scenarios
+
+```{r scenarios}
+oats_cover <- spacing_crop("Oats", "Drummond", c("1-sep", "30-sep"), 250, 30, 180,
+  tillage = spacing_tillage("no-till"), termination = spacing_termination("Date", date = "15-mar"))
+
+scenario_crops <- list(
+  BASE      = standard_rotation(),
+  N_LOW     = standard_rotation(wheat_n = c(15, 35, 25), maize_n = c(25, 50, 25)),
+  N_HIGH    = standard_rotation(wheat_n = c(45, 105, 75), maize_n = c(75, 150, 75)),
+  RAINFED   = standard_rotation(irrigated = FALSE),
+  NO_TILL   = standard_rotation(tillage = c(soybean = "no-till", wheat = "no-till", maize = "no-till")),
+  PLOUGH    = standard_rotation(tillage = c(soybean = "conventional", wheat = "conventional", maize = "conventional")),
+  STRAW_OFF = standard_rotation(wheat_straw_removed = 0.7),
+  COVER     = standard_rotation(cover_crop = oats_cover),
+  MANURE    = standard_rotation(wheat_n = c(0, 70, 50), maize_n = c(0, 100, 50),
+                                manure = c(wheat = 80, maize = 100)))
+
+scenario_info <- data.frame(scenario = names(scenario_crops), change = c(
+  "Standard management (as in the five-year workflow)",
+  "Mineral N halved on wheat and maize",
+  "Mineral N increased by half on wheat and maize",
+  "No irrigation",
+  "No-till for all three crops",
+  "Conventional tillage (90% incorporation) for all three crops",
+  "70% of the wheat straw removed at harvest (baled)",
+  "Oats cover crop after wheat, sown in September and terminated on 15 March before maize",
+  "Mineral N at sowing replaced by manure (wheat 80, maize 100 kg N/ha in total as manure)"),
+  stringsAsFactors = FALSE)
+SCENARIOS <- scenario_info$scenario
+scenarios <- lapply(SCENARIOS, function(s)
+  new_spacing_scenario(tolower(s), scenario_crops[[s]], soil = soil, latitude = 44.90, longitude = 10.63,
+                       start_year = 2020, end_year = 2024, cycles = 2, report = stable_soc))
+names(scenarios) <- SCENARIOS
+knitr::kable(scenario_info, col.names = c("Scenario", "What changes from the baseline"))
+```
+
+# Running the scenarios
+
+Each scenario runs in its own folder, with a copy of `apsim/spacing.config.json` pointing the weather and output files there. The `spacing_run` objects are saved, so the document can be rendered again with `params$rerun = false` without running APSIM.
+
+```{r run}
+run_scenario <- function(scenario) {
+  dir <- file.path(WORK_ROOT, scenario$id)
+  if (dir.exists(dir)) unlink(dir, recursive = TRUE)
+  dir.create(dir, recursive = TRUE)
+  cfg_json <- jsonlite::fromJSON(file.path(SPACING_ROOT, "spacing.config.json"))
+  cfg_json$TempWeatherDir <- file.path(dir, "weather"); cfg_json$OutputDir <- file.path(dir, "output")
+  cfg_file <- file.path(dir, "spacing.config.json")
+  jsonlite::write_json(cfg_json, cfg_file, auto_unbox = TRUE, pretty = TRUE)
+  cfg <- spacing_config(apsim_dir = SPACING_ROOT, config_file = cfg_file, use_compiled = TRUE,
+                        executable = TOOL2_DLL, run_root = file.path(dir, "runs"))
+  run_spacing(cfg, scenario, echo = FALSE)          # stops on a Tool2 or APSIM failure
+}
+runs_file <- file.path(OUTPUT_ROOT, "scenario_runs.rds")
+if (isTRUE(params$rerun)) {
+  started <- Sys.time()
+  runs <- lapply(scenarios, run_scenario)
+  saveRDS(runs, runs_file)
+  run_minutes <- as.numeric(difftime(Sys.time(), started, units = "mins"))
+} else {
+  runs <- readRDS(runs_file); run_minutes <- NA_real_
+}
+results <- lapply(runs, read_spacing)
+data.frame(scenario = SCENARIOS, status = vapply(runs, function(r) r$status, integer(1)),
+           seconds = round(vapply(runs, function(r) r$duration_seconds, numeric(1)), 1))
+```
+
+# Indicators
+
+## Definitions
+
+All flows are summed over the whole simulation, 1 January 2020 to 31 December 2024 (5 years, fallow periods included). Soil carbon changes are the difference between the last and the first day. Divide by 5 for annual values.
+
+| Indicator | Unit | From | Better when |
+|---|---|---|---|
+| Mean yield of wheat, maize, soybean | kg/ha | crop summary, harvested crops | higher |
+| N input, mineral + organic | kg N/ha | daily `FertN_kgNha` + `OrgN_kgNha` | (context) |
+| Irrigation | mm | daily `Irrig_mm` | (context) |
+| Change of stable SOC, whole profile / 0-30 cm | kg C/ha | `SOC_kgCha`, `SOC030_kgCha` (humic + microbial + inert) | higher |
+| Change of total soil C (with fresh organic matter) | kg C/ha | `SoilCtot_kgCha` | (context) |
+| Nitrate leaching | kg N/ha | daily `LeachNO3_kgNha` | lower |
+| Soil N2O emission | kg N2O-N/ha | daily `N2O_total_kgNha` | lower |
+| Soil CO2 from decomposition | kg CO2-C/ha | daily `CO2C_total_kgCha` | (context) |
+| N2O in CO2 equivalents | kg CO2e/ha | N2O-N x 44/28 x GWP100 (`r params$gwp_n2o`, IPCC AR6) | lower |
+| SOC change in CO2 equivalents | kg CO2e/ha | - (change of stable SOC) x 44/12 | lower (negative = removal) |
+| **Net soil GHG balance** | kg CO2e/ha | N2O in CO2e + SOC change in CO2e | lower |
+
+The soil CO2 from decomposition is shown for context and is not added to the balance. That carbon is already accounted in the change of SOC, together with the carbon that crop residues and manure bring in. The balance covers only the soil. Emissions from fertiliser manufacture, fuel and machinery, CH4, and indirect N2O from leached and volatilised N are not included.
+
+```{r indicators}
+period_sum <- function(d, column) sum(d[[column]], na.rm = TRUE)
+indicator_row <- function(name, res) {
+  d <- spacing_daily(res); cs <- spacing_crop_summary(res); n <- nrow(d)
+  harvested <- cs[cs$EndReason == "harvested", ]
+  yield <- tapply(harvested$Yield_kgha, harvested$Crop, mean)
+  data.frame(scenario = name,
+    wheat_yield = unname(yield["Wheat"]), maize_yield = unname(yield["Maize"]),
+    soybean_yield = unname(yield["Soybean"]),
+    n_input = period_sum(d, "FertN_kgNha") + period_sum(d, "OrgN_kgNha"),
+    irrigation = period_sum(d, "Irrig_mm"),
+    dsoc = d$SOC_kgCha[n] - d$SOC_kgCha[1], dsoc_030 = d$SOC030_kgCha[n] - d$SOC030_kgCha[1],
+    dsoil_c_total = d$SoilCtot_kgCha[n] - d$SoilCtot_kgCha[1],
+    leaching = period_sum(d, "LeachNO3_kgNha"), n2o = period_sum(d, "N2O_total_kgNha"),
+    co2c = period_sum(d, "CO2C_total_kgCha"), stringsAsFactors = FALSE)
+}
+ind <- do.call(rbind, Map(indicator_row, SCENARIOS, results))
+ind$n2o_co2e  <- ind$n2o * 44 / 28 * params$gwp_n2o
+ind$soc_co2e  <- -ind$dsoc * 44 / 12
+ind$net_ghg   <- ind$n2o_co2e + ind$soc_co2e
+rownames(ind) <- NULL
+utils::write.csv(ind, file.path(OUTPUT_ROOT, "scenario_indicators.csv"), row.names = FALSE)
+
+INDICATORS <- data.frame(
+  column = c("wheat_yield", "maize_yield", "soybean_yield", "dsoc", "dsoc_030", "leaching",
+             "n2o", "n2o_co2e", "net_ghg", "n_input", "irrigation", "co2c", "dsoil_c_total"),
+  label = c("Wheat yield (kg/ha)", "Maize yield (kg/ha)", "Soybean yield (kg/ha)",
+            "Stable SOC change, profile (kg C/ha)", "Stable SOC change, 0-30 cm (kg C/ha)",
+            "Nitrate leaching (kg N/ha)", "N2O emission (kg N2O-N/ha)", "N2O (kg CO2e/ha)",
+            "Net soil GHG balance (kg CO2e/ha)", "N input (kg N/ha)", "Irrigation (mm)",
+            "Soil CO2 from decomposition (kg C/ha)", "Total soil C change (kg C/ha)"),
+  better = c(1, 1, 1, 1, 1, -1, -1, -1, -1, 0, 0, 0, 0), stringsAsFactors = FALSE)
+```
+
+## Summary table
+
+Values are totals over 2020-2024, except yields, which are the mean of the harvests of each crop.
+
+```{r summary-table}
+show <- ind[, c("scenario", INDICATORS$column)]
+show[-1] <- lapply(show[-1], function(x) round(x, ifelse(max(abs(x)) < 50, 2, 0)))
+knitr::kable(show, col.names = c("Scenario", INDICATORS$label), format.args = list(big.mark = " "))
+```
+
+## Change from the baseline
+
+Each cell shows the change from BASE: absolute values for indicators near zero (SOC change, GHG balance), percentages otherwise. Colour shows whether the change is an improvement (blue) or a deterioration (red) for that indicator, and grey is neutral. Changes within ±2% are left uncoloured.
+
+```{r change-table, fig.height=5.2}
+base <- ind[ind$scenario == "BASE", ]
+scored <- INDICATORS[INDICATORS$better != 0, ]
+change <- do.call(rbind, lapply(seq_len(nrow(scored)), function(i) {
+  col <- scored$column[i]
+  absolute <- col %in% c("dsoc", "dsoc_030", "net_ghg")
+  delta <- round(ind[[col]] - base[[col]]) + 0          # + 0 turns -0 into 0
+  rel <- 100 * (ind[[col]] - base[[col]]) / abs(base[[col]])
+  rel_label <- round(rel) + 0
+  data.frame(scenario = ind$scenario, indicator = scored$label[i],
+             value = if (absolute) delta else rel,
+             label = if (absolute) sprintf("%+.0f", delta) else sprintf("%+.0f%%", rel_label),
+             benefit = pmax(-1, pmin(1, scored$better[i] * rel / 25)) * (abs(rel) >= 2),
+             stringsAsFactors = FALSE)
+}))
+change$indicator <- factor(change$indicator, levels = rev(scored$label))
+change$scenario <- factor(change$scenario, levels = SCENARIOS)
+change$label[change$scenario == "BASE"] <- ""
+ggplot(change, aes(scenario, indicator, fill = benefit)) +
+  geom_tile(colour = "white", linewidth = 1) +
+  geom_text(aes(label = label), size = 3.2, colour = COL_TEXT) +
+  scale_fill_gradient2(low = COL_WORSE, mid = COL_MID, high = COL_BETTER, midpoint = 0,
+                       limits = c(-1, 1), breaks = c(-1, 0, 1),
+                       labels = c("worse", "no change", "better")) +
+  labs(x = NULL, y = NULL, fill = NULL,
+       title = "Change from the baseline, 2020-2024",
+       subtitle = "Absolute change for SOC and GHG balance (kg C/ha, kg CO2e/ha); % for the others") +
+  theme(panel.grid = element_blank(), axis.text.x = element_text(angle = 30, hjust = 1),
+        legend.position = "bottom")
+```
+
+# Yield
+
+```{r yield, fig.height=5}
+yield_long <- do.call(rbind, lapply(c(Wheat = "wheat_yield", Maize = "maize_yield", Soybean = "soybean_yield"),
+  function(col) data.frame(scenario = ind$scenario, value = ind[[col]])))
+yield_long$crop <- factor(sub("\\..*", "", rownames(yield_long)), levels = c("Wheat", "Maize", "Soybean"))
+yield_long$scenario <- factor(yield_long$scenario, levels = rev(SCENARIOS))
+yield_long$is_base <- yield_long$scenario == "BASE"
+ggplot(yield_long, aes(value, scenario, fill = is_base)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = format(round(value), big.mark = " ")), hjust = -0.1, size = 3, colour = COL_TEXT) +
+  facet_wrap(~crop, scales = "free_x") +
+  scale_fill_manual(values = c(`TRUE` = COL_BASE, `FALSE` = COL_SCENARIO), guide = "none") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.3)), breaks = scales::breaks_pretty(3)) +
+  labs(x = "Mean yield (kg/ha)", y = NULL, title = "Mean yield by crop and scenario",
+       subtitle = "Wheat: mean of the 2021 and 2024 harvests; soybean: 2020 and 2023; maize: 2022")
+```
+
+The package helper `plot_spacing_comparison()` gives the same comparison straight from the results, here by harvest year:
+
+```{r yield-helper, fig.height=4.5}
+plot_spacing_comparison(results[c("BASE", "N_LOW", "N_HIGH", "RAINFED")], variable = "Yield",
+                        by = c("year", "scenario_id"), statistic = "mean") +
+  scale_fill_manual(values = c(BASE = COL_BASE, N_LOW = COL_SCENARIO, N_HIGH = COL_SCENARIO,
+                               RAINFED = COL_SCENARIO), guide = "none") +
+  labs(title = "Yield by harvest year (four of the scenarios)", x = "Harvest year", y = "Yield (kg/ha)",
+       subtitle = "2020 and 2023 soybean, 2021 and 2024 wheat, 2022 maize")
+```
+
+Wheat is the crop that responds to management: it is short of nitrogen on the demonstration soil (see the rotation audit). Maize changes only with the N rate. Soybean needs no N and changes only without irrigation.
+
+# Soil organic carbon
+
+## Over time
+
+Each panel shows one scenario (blue) against the baseline (grey). The y-axis is the change of stable SOC (humic + microbial + inert, whole profile) from 1 January 2020.
+
+```{r soc-time, fig.height=7}
+daily_long <- do.call(rbind, lapply(SCENARIOS, function(s) {
+  d <- spacing_daily(results[[s]])
+  data.frame(scenario = s, date = as.Date(substr(d$Clock.Today, 1, 10)),
+             soc = d$SOC_kgCha - d$SOC_kgCha[1], soc_030 = d$SOC030_kgCha - d$SOC030_kgCha[1],
+             leaching = cumsum(d$LeachNO3_kgNha), n2o = cumsum(d$N2O_total_kgNha))
+}))
+daily_long$scenario <- factor(daily_long$scenario, levels = SCENARIOS)
+panel_against_base <- function(column, ylab, title) {
+  base_line <- daily_long[daily_long$scenario == "BASE", c("date", column)]
+  others <- daily_long[daily_long$scenario != "BASE", ]
+  ggplot(others, aes(date, .data[[column]])) +
+    geom_line(data = base_line, colour = COL_BASE, linewidth = 0.6) +
+    geom_line(colour = COL_SCENARIO, linewidth = 0.7) +
+    facet_wrap(~scenario, ncol = 4) +
+    labs(x = NULL, y = ylab, title = title, subtitle = "Blue: scenario; grey: BASE")
+}
+panel_against_base("soc", "Change of stable SOC (kg C/ha)", "Stable soil organic carbon, whole profile")
+```
+
+## Five-year change
+
+```{r soc-bars, fig.height=4.8}
+soc_long <- rbind(
+  data.frame(scenario = ind$scenario, layer = "Whole profile (0-150 cm)", value = ind$dsoc),
+  data.frame(scenario = ind$scenario, layer = "Topsoil (0-30 cm)", value = ind$dsoc_030))
+soc_long$scenario <- factor(soc_long$scenario, levels = rev(SCENARIOS))
+ggplot(soc_long, aes(value, scenario, fill = scenario == "BASE")) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = sprintf("%+.0f", value)), hjust = -0.1, size = 3, colour = COL_TEXT) +
+  facet_wrap(~layer) +
+  scale_fill_manual(values = c(`TRUE` = COL_BASE, `FALSE` = COL_SCENARIO), guide = "none") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.2))) +
+  labs(x = "Change of stable SOC, 2020-2024 (kg C/ha)", y = NULL,
+       title = "Stable soil organic carbon gained in five years")
+```
+
+All scenarios gain carbon, including the baseline. This is partly because the demonstration soil does not start in equilibrium with this management: large maize residues and manure feed the humic pool. Five years is also short for SOC. **The differences between scenarios are more informative than the absolute gains.** The total soil C (`SoilCtot_kgCha`) differs from the stable SOC by the fresh organic matter present on the last day.
+
+# Nitrate leaching
+
+```{r leaching-time, fig.height=7}
+panel_against_base("leaching", "Cumulative NO3 leaching (kg N/ha)", "Nitrate leached below the profile")
+```
+
+```{r leaching-bars, fig.height=4}
+ggplot(transform(ind, scenario = factor(scenario, levels = rev(SCENARIOS))),
+       aes(leaching, scenario, fill = scenario == "BASE")) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = sprintf("%.0f", leaching)), hjust = -0.15, size = 3, colour = COL_TEXT) +
+  scale_fill_manual(values = c(`TRUE` = COL_BASE, `FALSE` = COL_SCENARIO), guide = "none") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(x = "NO3 leaching, 2020-2024 (kg N/ha)", y = NULL, title = "Total nitrate leaching")
+```
+
+# Greenhouse gases
+
+## Nitrous oxide over time
+
+```{r n2o-time, fig.height=7}
+panel_against_base("n2o", "Cumulative N2O (kg N2O-N/ha)", "Soil N2O emission")
+```
+
+## Net soil balance
+
+The net balance adds the N2O emission (in CO2e) to the CO2e of the SOC change. A carbon gain is a removal, so it counts as negative. Bars to the left of zero are a net removal from the atmosphere over the five years.
+
+```{r ghg-balance, fig.height=5}
+ghg_long <- rbind(
+  data.frame(scenario = ind$scenario, component = "N2O emission", value = ind$n2o_co2e),
+  data.frame(scenario = ind$scenario, component = "SOC change", value = ind$soc_co2e))
+ghg_long$scenario <- factor(ghg_long$scenario, levels = rev(SCENARIOS))
+ggplot(ghg_long, aes(value, scenario)) +
+  geom_col(aes(fill = component), width = 0.7, position = "stack") +
+  geom_point(data = transform(ind, scenario = factor(scenario, levels = rev(SCENARIOS))),
+             aes(net_ghg, scenario), shape = 21, size = 3, fill = "white", colour = COL_TEXT, stroke = 1) +
+  geom_vline(xintercept = 0, colour = COL_TEXT, linewidth = 0.4) +
+  scale_fill_manual(values = c(`N2O emission` = "#f47230", `SOC change` = COL_SCENARIO)) +
+  labs(x = "kg CO2e/ha, 2020-2024", y = NULL, fill = NULL,
+       title = "Net soil greenhouse-gas balance",
+       subtitle = "Bars: components; white dot: net balance (N2O + SOC change)") +
+  theme(legend.position = "top", legend.justification = "left")
+```
+
+# Trade-offs
+
+A practice can raise yield and also raise losses. The two panels place each scenario by its change in wheat yield (the crop that responds) against its change in nitrate leaching and in the net GHG balance. The best place to be is the top-left (more yield, lower losses).
+
+```{r tradeoffs, fig.height=5}
+trade <- data.frame(scenario = ind$scenario,
+  yield = 100 * (ind$wheat_yield / base$wheat_yield - 1),
+  leaching = 100 * (ind$leaching / base$leaching - 1),
+  ghg = ind$net_ghg - base$net_ghg)
+label_layer <- if (requireNamespace("ggrepel", quietly = TRUE))
+  ggrepel::geom_text_repel(aes(label = scenario), size = 3, colour = COL_TEXT, seed = 1) else
+  geom_text(aes(label = scenario), size = 3, vjust = -0.9, colour = COL_TEXT)
+p1 <- ggplot(trade, aes(leaching, yield)) +
+  geom_hline(yintercept = 0, colour = "grey75") + geom_vline(xintercept = 0, colour = "grey75") +
+  geom_point(aes(fill = scenario == "BASE"), shape = 21, size = 3, colour = "white", stroke = 1) +
+  label_layer + scale_fill_manual(values = c(`TRUE` = COL_BASE, `FALSE` = COL_SCENARIO), guide = "none") +
+  labs(x = "Change in NO3 leaching (%)", y = "Change in wheat yield (%)", title = "Yield vs leaching")
+p2 <- ggplot(trade, aes(ghg, yield)) +
+  geom_hline(yintercept = 0, colour = "grey75") + geom_vline(xintercept = 0, colour = "grey75") +
+  geom_point(aes(fill = scenario == "BASE"), shape = 21, size = 3, colour = "white", stroke = 1) +
+  label_layer + scale_fill_manual(values = c(`TRUE` = COL_BASE, `FALSE` = COL_SCENARIO), guide = "none") +
+  labs(x = "Change in net soil GHG balance (kg CO2e/ha)", y = NULL, title = "Yield vs GHG balance")
+patchwork::wrap_plots(p1, p2, ncol = 2)
+```
+
+# Reading the results
+
+```{r findings, include=FALSE}
+d_ <- function(s, col) ind[[col]][ind$scenario == s] - base[[col]]
+p_ <- function(s, col) 100 * d_(s, col) / abs(base[[col]])
+fmt <- function(x, digits = 0) formatC(abs(x), format = "f", digits = digits, big.mark = " ")
+# "61% lower", "56% higher", "no change" (within 1%)
+pct <- function(s, col) { x <- p_(s, col); if (abs(x) < 1) "unchanged" else
+  paste0(fmt(x), "% ", if (x > 0) "higher" else "lower") }
+# "1 007 kg C/ha more", "791 kg C/ha less"
+abs_ <- function(s, col, unit, words = c("more", "less")) {
+  x <- d_(s, col); paste(fmt(x), unit, if (x >= 0) words[1] else words[2]) }
+best_ghg <- ind$scenario[which.min(ind$net_ghg)]
+worst_ghg <- ind$scenario[which.max(ind$net_ghg)]
+all_negative <- all(ind$net_ghg < 0)
+```
+
+These statements are computed from the tables above, and each compares a scenario with BASE. They hold for the mock weather and the demonstration soil of this document.
+
+- **Nitrogen rate:**
+  - **N_LOW:** wheat yield is `r pct("N_LOW", "wheat_yield")` and maize yield `r pct("N_LOW", "maize_yield")`. Stable SOC gains `r abs_("N_LOW", "dsoc", "kg C/ha")`, since smaller crops return less residue.
+  - **N_HIGH:** wheat yield is `r pct("N_HIGH", "wheat_yield")`, but leaching is `r pct("N_HIGH", "leaching")` and N2O `r pct("N_HIGH", "n2o")`. This is the clearest trade-off between production and losses.
+- **Wheat straw removal (STRAW_OFF):** stable SOC gains `r abs_("STRAW_OFF", "dsoc", "kg C/ha")`. N2O is `r pct("STRAW_OFF", "n2o")` and leaching `r pct("STRAW_OFF", "leaching")`. The net soil GHG balance is `r abs_("STRAW_OFF", "net_ghg", "kg CO2e/ha", c("higher (worse)", "lower (better)"))`.
+- **Cover crop (COVER):** leaching is `r pct("COVER", "leaching")`, stable SOC gains `r abs_("COVER", "dsoc", "kg C/ha")`, and maize yield is `r pct("COVER", "maize_yield")`.
+- **Tillage:** stable SOC gains `r abs_("NO_TILL", "dsoc", "kg C/ha")` with NO_TILL and `r abs_("PLOUGH", "dsoc", "kg C/ha")` with PLOUGH. In Tool2, tillage incorporates surface residue and temporarily changes the runoff curve number; APSIM does not speed up decomposition after tillage. The effect of tillage on SOC is therefore small here.
+- **Irrigation (RAINFED):** soybean yield is `r pct("RAINFED", "soybean_yield")`, maize yield `r pct("RAINFED", "maize_yield")` and wheat yield `r pct("RAINFED", "wheat_yield")`. Leaching is `r pct("RAINFED", "leaching")`. With the mock weather, spring irrigation of wheat brings no yield benefit.
+- **Manure instead of mineral N at sowing (MANURE):** wheat yield is `r pct("MANURE", "wheat_yield")`, because manure N becomes available more slowly than urea. Stable SOC gains `r abs_("MANURE", "dsoc", "kg C/ha")`. The total N input is `r abs_("MANURE", "n_input", "kg N/ha")`.
+- **Net soil GHG balance:** lowest for **`r best_ghg`** and highest for **`r worst_ghg`**. `r if (all_negative) "All balances are negative, because the SOC gains outweigh N2O. This depends on the non-equilibrium starting soil discussed above." else "The sign of the balance depends on the SOC change, which is affected by the non-equilibrium starting soil discussed above."`
+
+**Limits:**
+
+- One location, mock weather and a demonstration soil; a single five-year sequence. Each crop is harvested only once or twice, so year-to-year weather variation is not sampled.
+- Only soil N2O and soil C are accounted. Indirect N2O, CH4, fertiliser manufacture and machinery are excluded.
+- The scenarios change one factor at a time, so interactions between practices are not explored.
+
+**Next steps:** for decisions, repeat this comparison with the site's measured soil and observed weather (`weather_file`, see cookbook recipe 8) over a longer period, with several rotation phases so that every crop meets every year.
+
+# Files
+
+```{r files}
+data.frame(file = c("scenario_indicators.csv", "scenario_runs.rds"),
+           content = c("indicators by scenario (the summary table)", "spacing_run objects, for rerun = false"),
+           folder = OUTPUT_ROOT)
+cat(sprintf("Model runs: %s min; document: %.1f min\n",
+            ifelse(is.na(run_minutes), "reused", sprintf("%.1f", run_minutes)),
+            as.numeric(difftime(Sys.time(), DOCUMENT_STARTED_AT, units = "mins"))))
+```

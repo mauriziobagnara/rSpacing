@@ -1,0 +1,1830 @@
+---
+title: "rSpacing 0.10.09: complete operational manual, revision 10"
+author: "Maurizio Bagnara and Microsoft 365 Copilot"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+    theme: flatly
+  word_document:
+    toc: true
+    number_sections: true
+params:
+  workspace_root: ".."
+  run_models: false
+  output_subdir: "manual_rev10"
+  build_configuration: "Debug"
+  target_framework: "net8.0"
+---
+
+# Purpose
+
+This document uses the **77 core functions** of rSpacing (configuration, requests, runs, outputs, plots, weather files and run specifications) in operational order. The scenario API added in rSpacing 0.10.07-0.10.09 (`spacing_crop()`, `new_spacing_scenario()` and the management and rotation options) is covered, with automatic checks, by the cookbook `rSpacing_cookbook_v1.00_EN.Rmd`. Each function has a dedicated chunk. Operations that require the local APSIMx solution or a model run are protected by explicit checks.
+
+Revision 10 (rSpacing 0.10.09, Spacing.Tool2 0.09.10) uses the shared workspace with sibling `rSpacing/` and `apsim/` repositories. By default, `params$run_models` is `false`: the manual documents and checks package functions without starting APSIMx. Set `run_models: true` explicitly for the integration test. The request keeps `mock = TRUE`, so `Spacing.Tool2` and APSIMx are executed without requiring the remote data service. Runs, results, and logs are written only under the corresponding workspace directories.
+
+**What the `setup` chunk does.** It prepares the rendering environment, loads rSpacing, sets global parameters, and determines whether model runs can be executed. The chunk produces no visible output, but creates the objects shared by all subsequent sections.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  fig.width = 10, fig.height = 6, dpi = 150
+)
+
+stopifnot(requireNamespace("rSpacing", quietly = TRUE))
+if (utils::packageVersion("rSpacing") < numeric_version("0.10.9")) {
+  stop(
+    "This report requires rSpacing 0.10.09 or later. Installed version: ",
+    as.character(utils::packageVersion("rSpacing"))
+  )
+}
+library(rSpacing)
+DOCUMENT_STARTED_AT <- Sys.time()
+MODEL_RUN_ELAPSED_SECONDS <- NA_real_
+
+RUN_MODELS <- isTRUE(params$run_models)
+BUILD_CONFIGURATION <- as.character(params$build_configuration)
+TARGET_FRAMEWORK <- as.character(params$target_framework)
+
+# All paths are derived from one shared root. The value ".." is
+# correct when this Rmd is executed from the workflows/ directory.
+WORKSPACE_ROOT <- normalizePath(
+  params$workspace_root,
+  winslash = "/",
+  mustWork = TRUE
+)
+RSPACING_ROOT <- normalizePath(
+  file.path(WORKSPACE_ROOT, "rSpacing"),
+  winslash = "/",
+  mustWork = TRUE
+)
+SPACING_ROOT <- normalizePath(
+  file.path(WORKSPACE_ROOT, "apsim"),
+  winslash = "/",
+  mustWork = TRUE
+)
+
+OUTPUT_SUBDIR <- as.character(params$output_subdir)
+if (!nzchar(OUTPUT_SUBDIR) || grepl("/", OUTPUT_SUBDIR, fixed = TRUE) || grepl("\\", OUTPUT_SUBDIR, fixed = TRUE)) {
+  stop("params$output_subdir must be one non-empty directory name.")
+}
+WORK_ROOT <- file.path(WORKSPACE_ROOT, "runs", OUTPUT_SUBDIR)
+OUTPUT_ROOT <- file.path(WORKSPACE_ROOT, "results", OUTPUT_SUBDIR)
+LOG_ROOT <- file.path(WORKSPACE_ROOT, "logs", OUTPUT_SUBDIR)
+for (path in c(WORK_ROOT, OUTPUT_ROOT, LOG_ROOT)) {
+  dir.create(path, recursive = TRUE, showWarnings = FALSE)
+}
+
+PROJECT_PATH <- file.path(
+  SPACING_ROOT, "src", "Spacing.Tool2", "Spacing.Tool2.csproj"
+)
+CONFIG_PATH <- file.path(SPACING_ROOT, "spacing.config.json")
+DLL_DEBUG <- file.path(
+  SPACING_ROOT, "src", "Spacing.Tool2", "bin", "Debug",
+  TARGET_FRAMEWORK, "spacing-tool2.dll"
+)
+DLL_RELEASE <- file.path(
+  SPACING_ROOT, "src", "Spacing.Tool2", "bin", "Release",
+  TARGET_FRAMEWORK, "spacing-tool2.dll"
+)
+preferred_dll <- if (identical(tolower(BUILD_CONFIGURATION), "release")) {
+  c(DLL_RELEASE, DLL_DEBUG)
+} else {
+  c(DLL_DEBUG, DLL_RELEASE)
+}
+existing_dll <- preferred_dll[file.exists(preferred_dll)]
+TOOL2_DLL <- if (length(existing_dll)) {
+  normalizePath(existing_dll[[1L]], winslash = "/", mustWork = TRUE)
+} else {
+  NA_character_
+}
+
+HAS_LOCAL_RUNTIME <- file.exists(PROJECT_PATH) &&
+  file.exists(CONFIG_PATH) && nzchar(Sys.which("dotnet")) &&
+  !is.na(TOOL2_DLL)
+
+if (RUN_MODELS && !HAS_LOCAL_RUNTIME) {
+  stop(
+    "Model execution is enabled, but the local runtime is incomplete. ",
+    "Check the project, spacing.config.json, dotnet, and DLL. DLL paths checked: ",
+    paste(preferred_dll, collapse = "; ")
+  )
+}
+
+runtime_configuration <- data.frame(
+  field = c(
+    "rSpacing_version", "workspace_root", "rspacing_root", "spacing_root",
+    "project_path", "config_path", "tool2_dll", "work_root",
+    "output_root", "log_root", "run_models"
+  ),
+  value = c(
+    as.character(utils::packageVersion("rSpacing")), WORKSPACE_ROOT,
+    RSPACING_ROOT, SPACING_ROOT, PROJECT_PATH, CONFIG_PATH,
+    if (is.na(TOOL2_DLL)) "NOT FOUND" else TOOL2_DLL,
+    WORK_ROOT, OUTPUT_ROOT, LOG_ROOT, as.character(RUN_MODELS)
+  ),
+  stringsAsFactors = FALSE
+)
+utils::write.csv(
+  runtime_configuration,
+  file.path(LOG_ROOT, "runtime_configuration.csv"),
+  row.names = FALSE
+)
+
+APSIMX_TEMPLATE <- file.path(SPACING_ROOT, "examples", "template.apsimx")
+result <- run <- cfg <- NULL
+```
+
+# Conventions
+
+- Objects are built progressively and reused in subsequent chunks.
+- Weather and geographic plots are available even without a model run.
+- Output and soil plots are generated when `result` is available.
+- Model-run chunks use `mock = TRUE` as the safe default.
+- The `runs/`, `results/`, and `logs/` directories remain outside both Git repositories.
+- `logs/manual_rev10/runtime_configuration.csv` records the effective runtime configuration.
+
+
+# Resolved execution environment
+
+The following table documents the paths actually used. With `run_models = false`, the DLL may be absent without preventing document rendering; with `run_models = true`, the project, configuration, `dotnet`, and DLL are required.
+
+```{r runtime-configuration}
+runtime_configuration
+```
+
+# Document configuration
+
+
+## spacing_config()
+
+**Purpose.** Demonstrates `spacing_config()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+Revision 10 runs the compiled `spacing-tool2.dll` (`use_compiled = TRUE`) instead of `dotnet run`, and gives Tool2 a copy of `spacing.config.json` whose weather and output folders are inside `runs/<output_subdir>/`, so that every file of the run stays in the workspace.
+
+```{r f01-spacing_config}
+if (HAS_LOCAL_RUNTIME) {
+  tool2_settings <- jsonlite::fromJSON(file.path(SPACING_ROOT, "spacing.config.json"))
+  tool2_settings$TempWeatherDir <- file.path(WORK_ROOT, "tool2_weather")
+  tool2_settings$OutputDir <- file.path(WORK_ROOT, "tool2_output")
+  run_config_file <- file.path(WORK_ROOT, "spacing.config.json")
+  jsonlite::write_json(tool2_settings, run_config_file, auto_unbox = TRUE, pretty = TRUE)
+  cfg <- spacing_config(
+    apsim_dir = SPACING_ROOT,
+    config_file = run_config_file,
+    run_root = file.path(WORK_ROOT, "legacy-runs"),
+    use_compiled = TRUE,
+    executable = TOOL2_DLL
+  )
+} else cfg <- NULL
+```
+
+
+## validate_spacing_config()
+
+**Purpose.** Demonstrates `validate_spacing_config()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f02-validate_spacing_config}
+if (!is.null(cfg)) validate_spacing_config(cfg, check_dotnet = RUN_MODELS)
+```
+
+
+## new_spacing_config_values()
+
+**Purpose.** Demonstrates `new_spacing_config_values()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f03-new_spacing_config_values}
+config_values <- new_spacing_config_values(
+  db_api_base_url = "http://localhost:8000/api/v1",
+  db_api_key = "",
+  temp_weather_dir = file.path(OUTPUT_ROOT, "weather"),
+  output_dir = file.path(OUTPUT_ROOT, "model-output"),
+  start_year = 2020, end_year = 2024,
+  max_parallelism = 1
+)
+```
+
+
+## validate_spacing_config_values()
+
+**Purpose.** Demonstrates `validate_spacing_config_values()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f04-validate_spacing_config_values}
+validate_spacing_config_values(config_values, check_directories = FALSE)
+```
+
+
+## write_spacing_config_file()
+
+**Purpose.** Demonstrates `write_spacing_config_file()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f05-write_spacing_config_file}
+config_json <- write_spacing_config_file(
+  config_values, file.path(OUTPUT_ROOT, "spacing.config.generated.json"),
+  overwrite = TRUE
+)
+```
+
+
+## read_spacing_config_file()
+
+**Purpose.** Demonstrates `read_spacing_config_file()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f06-read_spacing_config_file}
+config_values_roundtrip <- read_spacing_config_file(config_json)
+```
+
+
+## update_spacing_config_file()
+
+**Purpose.** Demonstrates `update_spacing_config_file()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f07-update_spacing_config_file}
+config_json_updated <- update_spacing_config_file(
+  config_json, values = list(MaxParallelism = 1),
+  output = file.path(OUTPUT_ROOT, "spacing.config.updated.json"),
+  backup = FALSE
+)
+```
+
+
+## prepare_spacing_config_set()
+
+**Purpose.** Demonstrates `prepare_spacing_config_set()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f08-prepare_spacing_config_set}
+config_scenarios <- data.frame(
+  scenario_id = c("baseline", "parallel2"),
+  MaxParallelism = c(1L, 2L)
+)
+config_set <- prepare_spacing_config_set(
+  base = config_values,
+  scenarios = config_scenarios,
+  directory = file.path(OUTPUT_ROOT, "config-set"),
+  overwrite = TRUE
+)
+
+# Immediately verify that both JSON files retain all required fields.
+config_set_values <- lapply(config_set$config_file, read_spacing_config_file)
+stopifnot(all(vapply(
+  config_set_values,
+  function(x) all(c(
+    "DbApiBaseUrl", "DbApiKey", "TempWeatherDir", "OutputDir",
+    "StartYear", "EndYear", "MaxParallelism"
+  ) %in% names(x)),
+  logical(1)
+)))
+config_set
+```
+
+
+## prepare_spacing_runtime()
+
+**Purpose.** Demonstrates `prepare_spacing_runtime()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f09-prepare_spacing_runtime}
+if (HAS_LOCAL_RUNTIME) {
+  runtime_setup <- prepare_spacing_runtime(
+    repository = WORKSPACE_ROOT, config = config_values,
+    config_path = file.path(OUTPUT_ROOT, "runtime", "spacing.config.json"),
+    overwrite = TRUE
+  )
+} else runtime_setup <- NULL
+```
+
+
+## print.spacing_config()
+
+**Purpose.** Demonstrates `print.spacing_config()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f10-print-spacing_config}
+if (!is.null(cfg)) print(cfg)
+```
+
+
+## print.spacing_config_values()
+
+**Purpose.** Demonstrates `print.spacing_config_values()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f11-print-spacing_config_values}
+print(config_values)
+```
+
+
+## print.spacing_runtime_setup()
+
+**Purpose.** Demonstrates `print.spacing_runtime_setup()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f12-print-spacing_runtime_setup}
+if (!is.null(runtime_setup)) print(runtime_setup)
+```
+
+
+# Weather data
+
+
+## spacing_met_default_units()
+
+**Purpose.** Demonstrates `spacing_met_default_units()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f13-spacing_met_default_units}
+met_units <- spacing_met_default_units()
+```
+
+
+## new_spacing_met()
+
+**Purpose.** Demonstrates `new_spacing_met()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f14-new_spacing_met}
+dates <- seq.Date(as.Date("2020-01-01"), as.Date("2020-12-31"), by = "day")
+met_data <- data.frame(
+  date = dates, radn = 15 + 8 * sin(2 * pi * as.numeric(format(dates, "%j")) / 366),
+  maxt = 20 + 10 * sin(2 * pi * (as.numeric(format(dates, "%j")) - 90) / 366),
+  mint = 10 + 8 * sin(2 * pi * (as.numeric(format(dates, "%j")) - 90) / 366),
+  rain = pmax(0, 2 + 2 * sin(2 * pi * as.numeric(format(dates, "%j")) / 31))
+)
+met <- new_spacing_met(met_data, latitude = 44.9, longitude = 10.63,
+                       site = "Gualtieri demo")
+```
+
+
+## prepare_spacing_met()
+
+**Purpose.** Demonstrates `prepare_spacing_met()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f15-prepare_spacing_met}
+prepared_met <- prepare_spacing_met(
+  met_data, latitude = 44.9, longitude = 10.63,
+  column_map = c(date = "date", radn = "radn", maxt = "maxt", mint = "mint", rain = "rain")
+)
+```
+
+
+## validate_spacing_met()
+
+**Purpose.** Demonstrates `validate_spacing_met()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f16-validate_spacing_met}
+validate_spacing_met(met, require_continuous = TRUE)
+```
+
+
+## write_spacing_met()
+
+**Purpose.** Demonstrates `write_spacing_met()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f17-write_spacing_met}
+met_path <- write_spacing_met(
+  met, file.path(OUTPUT_ROOT, "gualtieri_demo.met"), overwrite = TRUE
+)
+```
+
+
+## read_spacing_met()
+
+**Purpose.** Demonstrates `read_spacing_met()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f18-read_spacing_met}
+met_roundtrip <- read_spacing_met(met_path)
+```
+
+
+## set_spacing_met_column()
+
+**Purpose.** Demonstrates `set_spacing_met_column()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f19-set_spacing_met_column}
+met_with_vp <- set_spacing_met_column(
+  met_roundtrip, "vp", rep(12, nrow(met_roundtrip$data)), unit = "(hPa)"
+)
+```
+
+
+## remove_spacing_met_column()
+
+**Purpose.** Demonstrates `remove_spacing_met_column()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f20-remove_spacing_met_column}
+met_without_vp <- remove_spacing_met_column(met_with_vp, "vp")
+```
+
+
+## set_spacing_met_constant()
+
+**Purpose.** Demonstrates `set_spacing_met_constant()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f21-set_spacing_met_constant}
+met_with_constant <- set_spacing_met_constant(
+  met_without_vp, "co2", 420, unit = "(ppm)", comment = "Demo concentration"
+)
+```
+
+
+## subset_spacing_met()
+
+**Purpose.** Demonstrates `subset_spacing_met()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f22-subset_spacing_met}
+met_summer <- subset_spacing_met(
+  met_with_constant, as.Date("2020-04-01"), as.Date("2020-09-30")
+)
+```
+
+
+## set_apsimx_weather_file()
+
+**Purpose.** Demonstrates `set_apsimx_weather_file()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f23-set_apsimx_weather_file}
+if (file.exists(APSIMX_TEMPLATE)) {
+  apsimx_with_weather <- set_apsimx_weather_file(
+    APSIMX_TEMPLATE, met_path,
+    output = file.path(OUTPUT_ROOT, "weather-linked.apsimx"), overwrite = TRUE
+  )
+} else apsimx_with_weather <- NULL
+```
+
+
+## print.spacing_met()
+
+**Purpose.** Demonstrates `print.spacing_met()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f24-print-spacing_met}
+print(met_roundtrip)
+```
+
+
+## plot_spacing_met()
+
+**Purpose.** Demonstrates `plot_spacing_met()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f25-plot_spacing_met}
+p_met <- plot_spacing_met(met_roundtrip, title = "Demonstration weather")
+print(p_met)
+```
+
+
+# Request and model run
+
+
+## new_spacing_request()
+
+**Purpose.** Demonstrates `new_spacing_request()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f26-new_spacing_request}
+request <- new_spacing_request(
+  latitude = 44.9000, longitude = 10.6300,
+  rotation = "Maize", mock = TRUE,
+  scenario_id = "gualtieri_maize_mock"
+)
+```
+
+
+## validate_spacing_request()
+
+**Purpose.** Demonstrates `validate_spacing_request()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f27-validate_spacing_request}
+validate_spacing_request(request)
+```
+
+
+## build_spacing_args()
+
+**Purpose.** Demonstrates `build_spacing_args()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f28-build_spacing_args}
+if (!is.null(cfg)) cli_args <- build_spacing_args(cfg, request) else cli_args <- character()
+```
+
+
+## print.spacing_request()
+
+**Purpose.** Demonstrates `print.spacing_request()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f29-print-spacing_request}
+print(request)
+```
+
+
+## run_spacing()
+
+**Purpose.** Demonstrates `run_spacing()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f30-run_spacing}
+if (RUN_MODELS && !is.null(cfg)) {
+  model_run_started_at <- Sys.time()
+  run <- run_spacing(cfg, request, error_on_status = TRUE, echo = TRUE)
+  MODEL_RUN_ELAPSED_SECONDS <- as.numeric(
+    difftime(Sys.time(), model_run_started_at, units = "secs")
+  )
+} else run <- NULL
+```
+
+
+## print.spacing_run()
+
+**Purpose.** Demonstrates `print.spacing_run()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f31-print-spacing_run}
+if (!is.null(run)) print(run)
+```
+
+
+## discover_spacing_outputs()
+
+**Purpose.** Demonstrates `discover_spacing_outputs()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f32-discover_spacing_outputs}
+if (!is.null(cfg)) output_inventory_raw <- discover_spacing_outputs(cfg) else output_inventory_raw <- NULL
+```
+
+
+## read_spacing()
+
+**Purpose.** Demonstrates `read_spacing()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f33-read_spacing}
+if (!is.null(run)) result <- read_spacing(run) else result <- NULL
+```
+
+
+## print.spacing_result()
+
+**Purpose.** Demonstrates `print.spacing_result()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f34-print-spacing_result}
+if (!is.null(result)) print(result)
+```
+
+
+## read_spacing_datastore()
+
+**Purpose.** Demonstrates `read_spacing_datastore()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f35-read_spacing_datastore}
+if (!is.null(result) && length(result$outputs$datastore)) {
+  datastore_tables <- read_spacing_datastore(result$outputs$datastore[[1]])
+} else datastore_tables <- NULL
+```
+
+
+## read_spacing_csv()
+
+**Purpose.** Demonstrates `read_spacing_csv()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f36-read_spacing_csv}
+if (!is.null(result) && length(result$outputs$csv)) {
+  first_csv <- read_spacing_csv(result$outputs$csv[[1]])
+} else first_csv <- NULL
+```
+
+
+## collect_spacing()
+
+**Purpose.** Demonstrates `collect_spacing()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f37-collect_spacing}
+if (!is.null(result)) {
+  result_collection <- collect_spacing(list(result))
+  collection_inventory <- data.frame(
+    table = names(result_collection),
+    rows = vapply(result_collection, nrow, integer(1)),
+    columns = vapply(result_collection, ncol, integer(1)),
+    stringsAsFactors = FALSE
+  )
+  collection_inventory
+} else {
+  result_collection <- NULL
+}
+```
+
+# Result access and classification
+
+
+## spacing_daily()
+
+**Purpose.** Demonstrates `spacing_daily()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f38-spacing_daily}
+if (!is.null(result)) daily <- spacing_daily(result) else daily <- NULL
+```
+
+
+## spacing_report()
+
+**Purpose.** Demonstrates `spacing_report()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f39-spacing_report}
+if (!is.null(result)) report_table <- spacing_report(result) else report_table <- NULL
+```
+
+
+## spacing_crop_summary()
+
+**Purpose.** Demonstrates `spacing_crop_summary()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f40-spacing_crop_summary}
+if (!is.null(result)) crop_summary <- spacing_crop_summary(result) else crop_summary <- NULL
+```
+
+
+## spacing_units()
+
+**Purpose.** Demonstrates `spacing_units()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f41-spacing_units}
+if (!is.null(result)) units_table <- spacing_units(result) else units_table <- NULL
+```
+
+
+## spacing_variable_unit()
+
+**Purpose.** Demonstrates `spacing_variable_unit()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f42-spacing_variable_unit}
+if (!is.null(result)) example_unit <- spacing_variable_unit(result, "Yield") else example_unit <- NULL
+```
+
+
+## classify_spacing_variables()
+
+**Purpose.** Demonstrates `classify_spacing_variables()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f43-classify_spacing_variables}
+if (!is.null(result)) variable_classes <- classify_spacing_variables(result) else variable_classes <- NULL
+```
+
+
+## inventory_spacing_result()
+
+**Purpose.** Demonstrates `inventory_spacing_result()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f44-inventory_spacing_result}
+if (!is.null(result)) result_inventory <- inventory_spacing_result(result) else result_inventory <- NULL
+```
+
+
+## spacing_variable_dictionary()
+
+**Purpose.** Demonstrates `spacing_variable_dictionary()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f45-spacing_variable_dictionary}
+if (!is.null(result)) variable_dictionary <- spacing_variable_dictionary(result) else variable_dictionary <- NULL
+```
+
+
+## describe_spacing_variable()
+
+**Purpose.** Demonstrates `describe_spacing_variable()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f46-describe_spacing_variable}
+variable_description <- describe_spacing_variable("Yield", source = "report", result = result)
+```
+
+
+# Robust selection of plotting variables
+
+The daily and Report plotting functions of rSpacing require an explicit variable name. The following block selects an available numeric column while excluding dates and identifiers. The selected variable is shown in the document to make the plot reproducible and interpretable.
+
+```{r select-plot-variables}
+select_plot_variable <- function(data, preferred = character()) {
+  if (is.null(data) || !is.data.frame(data) || !nrow(data)) return(NA_character_)
+  numeric_names <- names(data)[vapply(data, is.numeric, logical(1))]
+  numeric_names <- numeric_names[!grepl(
+    "date|time|year|month|day|simulation|checkpoint|zone|clock|id$",
+    numeric_names,
+    ignore.case = TRUE
+  )]
+  preferred_found <- preferred[preferred %in% numeric_names]
+  if (length(preferred_found)) return(preferred_found[[1L]])
+  if (length(numeric_names)) return(numeric_names[[1L]])
+  NA_character_
+}
+
+daily_plot_variable <- select_plot_variable(
+  daily,
+  preferred = c("SoilCtot_kgCha", "N2O_total_kgNha", "LeachNO3_kgNha")
+)
+report_plot_variable <- select_plot_variable(
+  report_table,
+  preferred = c("Wheat_Yield_kgha", "Maize_Yield_kgha", "Soybean_Yield_kgha")
+)
+
+plot_variable_selection <- data.frame(
+  source = c("daily", "report"),
+  variable = c(daily_plot_variable, report_plot_variable),
+  available = c(!is.na(daily_plot_variable), !is.na(report_plot_variable)),
+  stringsAsFactors = FALSE
+)
+plot_variable_selection
+```
+
+# Result plots
+
+
+## plot_spacing_daily()
+
+**Purpose.** Demonstrates `plot_spacing_daily()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f47-plot_spacing_daily}
+if (!is.null(result) && !is.na(daily_plot_variable)) {
+  p_daily <- plot_spacing_daily(result, variable = daily_plot_variable)
+  print(p_daily)
+} else {
+  message("Daily plot skipped: no suitable numeric daily variable is available.")
+}
+```
+
+
+## plot_spacing_report()
+
+**Purpose.** Demonstrates `plot_spacing_report()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f48-plot_spacing_report}
+if (!is.null(result) && !is.na(report_plot_variable)) {
+  p_report <- plot_spacing_report(result, variable = report_plot_variable)
+  print(p_report)
+} else {
+  message("Report plot skipped: no suitable numeric Report variable is available.")
+}
+```
+
+
+## plot_spacing_result()
+
+**Purpose.** Demonstrates `plot_spacing_result()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f49-plot_spacing_result}
+if (!is.null(result)) { p_result <- plot_spacing_result(result); print(p_result) }
+```
+
+
+## plot_spacing_daily_panel()
+
+**Purpose.** Demonstrates `plot_spacing_daily_panel()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f50-plot_spacing_daily_panel}
+if (!is.null(result) && !is.na(daily_plot_variable)) {
+  panel_formals <- names(formals(plot_spacing_daily_panel))
+  p_daily_panel <- if ("variable" %in% panel_formals) {
+    plot_spacing_daily_panel(result, variable = daily_plot_variable)
+  } else if ("variables" %in% panel_formals) {
+    plot_spacing_daily_panel(result, variables = daily_plot_variable)
+  } else {
+    plot_spacing_daily_panel(result)
+  }
+  print(p_daily_panel)
+} else {
+  message("Daily panel skipped: no suitable numeric daily variable is available.")
+}
+```
+
+
+## plot_spacing_report_panel()
+
+**Purpose.** Demonstrates `plot_spacing_report_panel()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f51-plot_spacing_report_panel}
+if (!is.null(result) && !is.na(report_plot_variable)) {
+  panel_formals <- names(formals(plot_spacing_report_panel))
+  p_report_panel <- if ("variable" %in% panel_formals) {
+    plot_spacing_report_panel(result, variable = report_plot_variable)
+  } else if ("variables" %in% panel_formals) {
+    plot_spacing_report_panel(result, variables = report_plot_variable)
+  } else {
+    plot_spacing_report_panel(result)
+  }
+  print(p_report_panel)
+} else {
+  message("Report panel skipped: no suitable numeric Report variable is available.")
+}
+```
+
+
+## plot_spacing_variable_panel()
+
+**Purpose.** Demonstrates `plot_spacing_variable_panel()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f52-plot_spacing_variable_panel}
+if (!is.null(result)) {
+  dictionary <- spacing_variable_dictionary(result)
+
+  # Use only variables that are numeric in an imported result table. The first
+  # dictionary row may be a date such as Clock.Today and is therefore unsafe.
+  numeric_daily <- if (is.data.frame(daily) && nrow(daily)) {
+    names(daily)[vapply(daily, is.numeric, logical(1))]
+  } else character()
+  numeric_report <- if (is.data.frame(report_table) && nrow(report_table)) {
+    names(report_table)[vapply(report_table, is.numeric, logical(1))]
+  } else character()
+  numeric_available <- unique(c(numeric_daily, numeric_report))
+  numeric_available <- numeric_available[!grepl(
+    "date|time|year|month|day|simulation|checkpoint|zone|clock|id$",
+    numeric_available,
+    ignore.case = TRUE
+  )]
+
+  dictionary_variables <- if (
+    is.data.frame(dictionary) && nrow(dictionary) &&
+    "variable" %in% names(dictionary)
+  ) {
+    as.character(dictionary$variable)
+  } else character()
+
+  dictionary_numeric <- dictionary_variables[
+    dictionary_variables %in% numeric_available
+  ]
+  preferred_variable <- c(
+    daily_plot_variable,
+    report_plot_variable,
+    dictionary_numeric,
+    numeric_available
+  )
+  preferred_variable <- preferred_variable[
+    !is.na(preferred_variable) & nzchar(preferred_variable)
+  ]
+  variable_name <- if (length(preferred_variable)) {
+    preferred_variable[[1L]]
+  } else {
+    NA_character_
+  }
+
+  variable_panel_selection <- data.frame(
+    variable = variable_name,
+    numeric_in_daily = !is.na(variable_name) && variable_name %in% numeric_daily,
+    numeric_in_report = !is.na(variable_name) && variable_name %in% numeric_report,
+    stringsAsFactors = FALSE
+  )
+  variable_panel_selection
+
+  if (!is.na(variable_name)) {
+    p_variable <- plot_spacing_variable_panel(
+      result,
+      variable = variable_name
+    )
+    print(p_variable)
+  } else {
+    message(
+      "Variable panel skipped: no numeric non-identifier variable is available."
+    )
+  }
+}
+```
+
+
+## plot_spacing_panels()
+
+**Purpose.** Demonstrates `plot_spacing_panels()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f53-plot_spacing_panels}
+if (!is.null(result)) {
+  all_panels <- plot_spacing_panels(result, source = "daily", variables = "all")
+  invisible(lapply(all_panels, print))
+}
+```
+
+
+# Coordinates and maps
+
+
+## spacing_coordinates()
+
+**Purpose.** Demonstrates `spacing_coordinates()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f54-spacing_coordinates}
+coordinates <- spacing_coordinates(request, label = "Gualtieri")
+```
+
+
+## plot_spacing_location()
+
+**Purpose.** Demonstrates `plot_spacing_location()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f55-plot_spacing_location}
+p_location <- plot_spacing_location(request)
+print(p_location)
+```
+
+
+## plot_spacing_map()
+
+**Purpose.** Demonstrates `plot_spacing_map()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f56-plot_spacing_map}
+p_map_static <- plot_spacing_map(request, type = "static", title = "Simulation location")
+print(p_map_static)
+```
+
+
+# Soil and profiles
+
+
+## spacing_soil_layers()
+
+**Purpose.** Demonstrates `spacing_soil_layers()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f57-spacing_soil_layers}
+if (!is.null(result)) soil_layers <- spacing_soil_layers(result) else soil_layers <- NULL
+```
+
+
+## plot_spacing_soil_profile()
+
+**Purpose.** Demonstrates `plot_spacing_soil_profile()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f58-plot_spacing_soil_profile}
+if (!is.null(result)) {
+  # Layered APSIMx outputs are encoded as Variable(1), Variable(2), ... .
+  # Derive the admissible base names from the imported tables instead of
+  # assuming that the fixture exports a variable called exactly "SW".
+  soil_source_tables <- Filter(
+    function(x) is.data.frame(x) && nrow(x),
+    list(daily = daily, report = report_table)
+  )
+  soil_column_names <- unique(unlist(
+    lapply(soil_source_tables, names),
+    use.names = FALSE
+  ))
+  indexed_columns <- soil_column_names[grepl(
+    "\\([0-9]+\\)$",
+    soil_column_names
+  )]
+  indexed_soil_variables <- unique(sub(
+    "\\([0-9]+\\)$",
+    "",
+    indexed_columns
+  ))
+
+  # Prefer familiar water and nitrogen variables when they are genuinely
+  # exported; otherwise use the first available indexed variable.
+  preferred_soil_variables <- c(
+    "SW", "Water.SW", "SoilWater.SW", "NO3", "NH4",
+    "SoilC", "SoilCtot"
+  )
+  preferred_found <- preferred_soil_variables[
+    preferred_soil_variables %in% indexed_soil_variables
+  ]
+  soil_window_variable <- if (length(preferred_found)) {
+    preferred_found[[1L]]
+  } else if (length(indexed_soil_variables)) {
+    indexed_soil_variables[[1L]]
+  } else {
+    NA_character_
+  }
+
+  soil_variable_selection <- data.frame(
+    selected_variable = soil_window_variable,
+    indexed_variables_found = paste(indexed_soil_variables, collapse = "; "),
+    stringsAsFactors = FALSE
+  )
+  soil_variable_selection
+
+  if (!is.na(soil_window_variable)) {
+    soil_plot_error <- NULL
+    p_soil <- tryCatch(
+      plot_spacing_soil_profile(
+        result,
+        variable = soil_window_variable,
+        type = "time_depth"
+      ),
+      error = function(e) {
+        soil_plot_error <<- conditionMessage(e)
+        NULL
+      }
+    )
+    if (!is.null(p_soil)) {
+      print(p_soil)
+    } else {
+      message(
+        "Soil profile plot skipped for '", soil_window_variable,
+        "': ", soil_plot_error
+      )
+    }
+  } else {
+    message(
+      "Soil profile plot skipped: the result contains no columns named ",
+      "Variable(1), Variable(2), ... ."
+    )
+  }
+}
+```
+
+
+## plot_spacing_soil_profiles()
+
+**Purpose.** Demonstrates `plot_spacing_soil_profiles()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f59-plot_spacing_soil_profiles}
+if (!is.null(result) && exists("indexed_soil_variables")) {
+  soil_panel_variables <- utils::head(indexed_soil_variables, 2L)
+  if (length(soil_panel_variables)) {
+    soil_panels_error <- NULL
+    p_soils <- tryCatch(
+      plot_spacing_soil_profiles(
+        result,
+        variables = soil_panel_variables,
+        type = "profile"
+      ),
+      error = function(e) {
+        soil_panels_error <<- conditionMessage(e)
+        NULL
+      }
+    )
+    if (!is.null(p_soils)) {
+      invisible(lapply(p_soils, print))
+    } else {
+      message("Soil profile collection skipped: ", soil_panels_error)
+    }
+  } else {
+    message("Soil profile collection skipped: no indexed variables found.")
+  }
+}
+```
+
+
+## new_spacing_soil_spec()
+
+**Purpose.** Demonstrates `new_spacing_soil_spec()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f60-new_spacing_soil_spec}
+soil_spec <- new_spacing_soil_spec(
+  profile_id = "GUALTIERI_LOAM_001",
+  thickness = c(150, 150, 300, 300, 300, 300),
+  bd = c(1.28, 1.33, 1.39, 1.43, 1.46, 1.49),
+  air_dry = c(.06, .07, .08, .09, .10, .11),
+  ll15 = c(.14, .15, .16, .16, .16, .15),
+  dul = c(.31, .32, .33, .32, .31, .30),
+  sat = c(.46, .45, .44, .43, .42, .41),
+  ks = c(35, 25, 15, 10, 8, 6),
+  carbon = c(1.45, 1.15, .75, .48, .32, .24),
+  soil_cn_ratio = rep(12, 6), ph = c(7.2, 7.3, 7.4, 7.5, 7.6, 7.7),
+  no3 = c(18, 12, 8, 5, 3.5, 2.5), nh4 = c(2, 1.5, 1, .7, .5, .4)
+)
+```
+
+
+# Cultivars, rotation, and management
+
+
+## spacing_cultivars()
+
+**Purpose.** Demonstrates `spacing_cultivars()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f61-spacing_cultivars}
+verified_cultivars <- spacing_cultivars()
+```
+
+
+## spacing_validate_cultivar()
+
+**Purpose.** Demonstrates `spacing_validate_cultivar()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f62-spacing_validate_cultivar}
+spacing_validate_cultivar("Soybean", "Generic_MG1")
+```
+
+
+## new_spacing_cultivar_spec()
+
+**Purpose.** Demonstrates `new_spacing_cultivar_spec()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f63-new_spacing_cultivar_spec}
+# Native B_130 is already used in the rotation without overrides. This object
+# instead demonstrates a derived cultivar with one explicit valid override.
+maize_cultivar <- new_spacing_cultivar_spec(
+  crop = "Maize",
+  name = "B_130_RUE_DEMO",
+  parameters = stats::setNames(
+    list(2.0),
+    "Leaf.Photosynthesis.RUE.FixedValue"
+  ),
+  aliases = "B_130",
+  metadata = list(
+    SourceCultivar = "B_130",
+    Purpose = "Documented cultivar override example"
+  )
+)
+```
+
+
+## new_spacing_rotation_spec()
+
+**Purpose.** Demonstrates `new_spacing_rotation_spec()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f64-new_spacing_rotation_spec}
+rotation_spec <- new_spacing_rotation_spec(
+  name = "Wheat-Maize-Soybean",
+  phases = list(
+    list(Crop = "Wheat", Cultivar = "Claire"),
+    list(Crop = "Maize", Cultivar = "B_130"),
+    list(Crop = "Soybean", Cultivar = "Generic_MG1")
+  ), repeat_rotation = TRUE
+)
+```
+
+
+## spacing_irrigation()
+
+**Purpose.** Demonstrates `spacing_irrigation()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f65-spacing_irrigation}
+maize_irrigation <- spacing_irrigation(
+  threshold = 0.50, target = 0.85, max_application_mm = 35,
+  window_start = "1-jun", window_end = "31-aug",
+  label = "Maize B_130"
+)
+```
+
+
+## spacing_apply_irrigation()
+
+**Purpose.** Demonstrates `spacing_apply_irrigation()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f66-spacing_apply_irrigation}
+management_json <- spacing_apply_irrigation(
+  list(cultivar = "B_130"), maize_irrigation
+)
+```
+
+
+## spacing_fertiliser_application()
+
+**Purpose.** Demonstrates `spacing_fertiliser_application()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f67-spacing_fertiliser_application}
+side_dress <- spacing_fertiliser_application(
+  amount_kg_n_ha = 100, fertiliser = "UreaN",
+  trigger = "DaysAfterSowing", days_after_sowing = 35
+)
+```
+
+
+## spacing_fertilisation()
+
+**Purpose.** Demonstrates `spacing_fertilisation()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f68-spacing_fertilisation}
+maize_fertilisation <- spacing_fertilisation(
+  at_sowing_kg_n_ha = 50,
+  applications = list(side_dress), fertiliser = "UreaN"
+)
+```
+
+
+## spacing_apply_fertilisation()
+
+**Purpose.** Demonstrates `spacing_apply_fertilisation()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f69-spacing_apply_fertilisation}
+management_json <- spacing_apply_fertilisation(
+  management_json, maize_fertilisation
+)
+```
+
+
+## new_spacing_management_spec()
+
+**Purpose.** Demonstrates `new_spacing_management_spec()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f70-new_spacing_management_spec}
+management_spec <- new_spacing_management_spec(
+  fertilisation = list(), irrigation = list(),
+  tillage = list(), residues = list()
+)
+```
+
+
+# Parameters and run specification
+
+
+## spacing_parameter_catalogue()
+
+**Purpose.** Demonstrates `spacing_parameter_catalogue()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f71-spacing_parameter_catalogue}
+parameter_catalogue <- spacing_parameter_catalogue(
+  parameter_id = c("maize_rue", "maize_grain_fill"),
+  crop = c("Maize", "Maize"), scope = c("cultivar", "cultivar"),
+  apsim_path = c("Leaf.Photosynthesis.RUE.FixedValue",
+                 "[Phenology].GrainFilling.Target.FixedValue"),
+  unit = c("g/MJ", "degree day"),
+  lower_bound = c(1.2, 400), upper_bound = c(3.2, 950)
+)
+```
+
+
+## validate_spacing_parameters()
+
+**Purpose.** Demonstrates `validate_spacing_parameters()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f72-validate_spacing_parameters}
+validated_parameters <- validate_spacing_parameters(
+  list(maize_rue = 2.0, maize_grain_fill = 730), parameter_catalogue,
+  require_all = TRUE
+)
+```
+
+
+## new_spacing_run_spec()
+
+**Purpose.** Demonstrates `new_spacing_run_spec()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f73-new_spacing_run_spec}
+run_spec <- new_spacing_run_spec(
+  run_id = "gualtieri_2020_2024", latitude = 44.9, longitude = 10.63,
+  start_year = 2020, end_year = 2024, weather_file = met_path,
+  soil = soil_spec, rotation = rotation_spec,
+  cultivars = list(maize_cultivar), management = management_spec,
+  parameter_values = validated_parameters, catalogue = parameter_catalogue,
+  metadata = list(Purpose = "Documented package workflow")
+)
+```
+
+
+## validate_spacing_run_spec()
+
+**Purpose.** Demonstrates `validate_spacing_run_spec()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f74-validate_spacing_run_spec}
+validate_spacing_run_spec(run_spec)
+```
+
+
+## write_spacing_run_spec()
+
+**Purpose.** Demonstrates `write_spacing_run_spec()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f75-write_spacing_run_spec}
+run_spec_path <- write_spacing_run_spec(
+  run_spec, file.path(OUTPUT_ROOT, "run_spec.json"), overwrite = TRUE
+)
+```
+
+
+## read_spacing_run_spec()
+
+**Purpose.** Demonstrates `read_spacing_run_spec()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f76-read_spacing_run_spec}
+run_spec_roundtrip <- read_spacing_run_spec(run_spec_path)
+stopifnot(
+  inherits(run_spec_roundtrip$ParameterCatalogue,
+           "spacing_parameter_catalogue"),
+  identical(
+    run_spec_roundtrip$ParameterCatalogue$parameter_id,
+    parameter_catalogue$parameter_id
+  )
+)
+run_spec_roundtrip$ParameterCatalogue
+```
+
+
+## update_spacing_parameters()
+
+**Purpose.** Demonstrates `update_spacing_parameters()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r f77-update_spacing_parameters}
+run_spec_updated <- update_spacing_parameters(
+  run_spec_roundtrip, list(maize_rue = 2.1), parameter_catalogue
+)
+```
+
+
+# Additional S3 methods
+
+S3 methods are registered in `NAMESPACE` and should not be called directly. The following chunks use the public generics `print()`, `plot()`, `summary()`, and `as.list()`; method dispatch automatically selects the correct implementation.
+
+## plot.spacing_result()
+
+**Purpose.** Demonstrates `plot.spacing_result()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r s3-plot-spacing-result}
+if (!is.null(result)) plot(result)
+```
+
+## plot.spacing_met()
+
+**Purpose.** Demonstrates `plot.spacing_met()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r s3-plot-spacing-met}
+plot(met_roundtrip)
+```
+
+## print.spacing_run_spec()
+
+**Purpose.** Demonstrates `print.spacing_run_spec()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r s3-print-spacing-run-spec}
+print(run_spec)
+```
+
+## as.list.spacing_irrigation()
+
+**Purpose.** Demonstrates `as.list.spacing_irrigation()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r s3-as-list-spacing-irrigation}
+irrigation_json_fields <- as.list(maize_irrigation)
+irrigation_json_fields
+```
+
+## print.spacing_irrigation()
+
+**Purpose.** Demonstrates `print.spacing_irrigation()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r s3-print-spacing-irrigation}
+print(maize_irrigation)
+```
+
+## summary.spacing_irrigation()
+
+**Purpose.** Demonstrates `summary.spacing_irrigation()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r s3-summary-spacing-irrigation}
+irrigation_summary <- summary(maize_irrigation)
+irrigation_summary
+```
+
+## as.list.spacing_fertilisation()
+
+**Purpose.** Demonstrates `as.list.spacing_fertilisation()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r s3-as-list-spacing-fertilisation}
+fertilisation_json_fields <- as.list(maize_fertilisation)
+fertilisation_json_fields
+```
+
+## print.spacing_fertilisation()
+
+**Purpose.** Demonstrates `print.spacing_fertilisation()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r s3-print-spacing-fertilisation}
+print(maize_fertilisation)
+```
+
+## summary.spacing_result()
+
+**Purpose.** Demonstrates `summary.spacing_result()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r s3-summary-spacing-result}
+if (!is.null(result)) result_summary <- summary(result) else result_summary <- NULL
+result_summary
+```
+
+## print.summary.spacing_result()
+
+**Purpose.** Demonstrates `print.summary.spacing_result()` in the operational rSpacing workflow and explains where the function is used.
+
+**Main inputs.** Uses the validated objects created in the preceding chunks and the arguments shown in the code example.
+
+**Output and subsequent use.** Returns the object shown in the chunk, which is retained for validation, inspection, plotting, serialisation, or later workflow steps as appropriate.
+
+```{r s3-print-summary-spacing-result}
+if (!is.null(result_summary)) print(result_summary)
+```
+
+# Final audit
+
+The final chunk verifies that the document contains a dedicated example for every exported function and summarises the objects created.
+
+**What the final audit does.** It verifies that all public functions and S3 methods described in the manual are available in the installed namespace. It also reports the document version, local runtime availability, and model-run status.
+
+```{r audit-finale}
+exported_functions <- getNamespaceExports("rSpacing")
+documented_exports <- c(
+  "spacing_config", "validate_spacing_config", "new_spacing_request",
+  "validate_spacing_request", "build_spacing_args", "run_spacing",
+  "discover_spacing_outputs", "read_spacing_datastore", "read_spacing_csv",
+  "read_spacing", "collect_spacing", "new_spacing_config_values",
+  "read_spacing_config_file", "write_spacing_config_file",
+  "update_spacing_config_file", "prepare_spacing_config_set",
+  "prepare_spacing_runtime", "validate_spacing_config_values",
+  "new_spacing_met", "prepare_spacing_met", "read_spacing_met",
+  "write_spacing_met", "validate_spacing_met", "set_spacing_met_column",
+  "remove_spacing_met_column", "set_spacing_met_constant",
+  "subset_spacing_met", "spacing_met_default_units",
+  "set_apsimx_weather_file", "spacing_daily", "spacing_report",
+  "spacing_crop_summary", "spacing_units", "spacing_variable_unit",
+  "classify_spacing_variables", "inventory_spacing_result",
+  "plot_spacing_daily", "plot_spacing_report", "plot_spacing_result",
+  "plot_spacing_daily_panel", "plot_spacing_report_panel",
+  "plot_spacing_variable_panel", "plot_spacing_panels",
+  "spacing_variable_dictionary", "describe_spacing_variable",
+  "spacing_coordinates", "plot_spacing_location", "plot_spacing_map",
+  "plot_spacing_met", "spacing_soil_layers", "plot_spacing_soil_profile",
+  "plot_spacing_soil_profiles", "new_spacing_soil_spec",
+  "new_spacing_cultivar_spec", "new_spacing_rotation_spec",
+  "new_spacing_management_spec", "spacing_parameter_catalogue",
+  "validate_spacing_parameters", "new_spacing_run_spec",
+  "validate_spacing_run_spec", "write_spacing_run_spec",
+  "read_spacing_run_spec", "update_spacing_parameters",
+  "spacing_irrigation", "spacing_apply_irrigation",
+  "spacing_fertiliser_application", "spacing_fertilisation",
+  "spacing_apply_fertilisation", "spacing_cultivars",
+  "spacing_validate_cultivar"
+)
+registered_s3_methods <- c(
+  "print.spacing_config", "print.spacing_request", "print.spacing_run",
+  "print.spacing_result", "plot.spacing_result", "plot.spacing_met",
+  "print.spacing_run_spec", "as.list.spacing_irrigation",
+  "print.spacing_irrigation", "summary.spacing_irrigation",
+  "as.list.spacing_fertilisation", "print.spacing_fertilisation",
+  "summary.spacing_result", "print.summary.spacing_result",
+  "print.spacing_config_values", "print.spacing_runtime_setup",
+  "print.spacing_met"
+)
+
+missing_exports <- setdiff(documented_exports, exported_functions)
+registered_methods_found <- vapply(
+  registered_s3_methods,
+  function(method) exists(method, envir = asNamespace("rSpacing"), inherits = FALSE),
+  logical(1)
+)
+stopifnot(length(missing_exports) == 0L)
+stopifnot(all(registered_methods_found))
+
+data.frame(
+  exported_functions_documented = length(documented_exports),
+  registered_s3_methods_documented = length(registered_s3_methods),
+  local_runtime_available = HAS_LOCAL_RUNTIME,
+  model_runs_enabled = RUN_MODELS,
+  output_directory = OUTPUT_ROOT
+)
+```
+
+# Expected outputs
+
+When `run_models = true` and the model run completes successfully, the document shows daily data, reports, crop summaries, units, the variable dictionary, coordinates, maps, and all available plots. Objects built before the run, including weather, soil, cultivar, rotation, irrigation, fertilisation, and run specification, remain in the R session and can be saved with `saveRDS()`.
+
+
+# Computation time
+
+This manual performs zero APSIMx runs when `run_models = false` and one APSIMx run when `run_models = true`. The table below reports the measured model-run time and the total elapsed rendering time. Times depend on computer performance, storage speed, .NET warm-up, and whether dependencies have already been restored. The measured values from the target workstation should be used for planning; no fixed cross-computer duration is assumed.
+
+```{r computation-time}
+TOTAL_DOCUMENT_ELAPSED_SECONDS <- as.numeric(
+  difftime(Sys.time(), DOCUMENT_STARTED_AT, units = "secs")
+)
+computation_time <- data.frame(
+  mode = if (RUN_MODELS) "documentation plus one APSIMx run" else "documentation only",
+  planned_APSIMx_runs = if (RUN_MODELS) 1L else 0L,
+  measured_model_run_seconds = MODEL_RUN_ELAPSED_SECONDS,
+  measured_total_render_seconds = TOTAL_DOCUMENT_ELAPSED_SECONDS,
+  measured_total_render_minutes = TOTAL_DOCUMENT_ELAPSED_SECONDS / 60,
+  stringsAsFactors = FALSE
+)
+computation_time
+utils::write.csv(
+  computation_time,
+  file.path(LOG_ROOT, "computation_time.csv"),
+  row.names = FALSE
+)
+```
